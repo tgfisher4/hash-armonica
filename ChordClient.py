@@ -23,14 +23,17 @@ class FingerTableEntry:
 class ChordClient:
     # add/subtract 1 from start/end to determine where the = goes (integers)
     def inrange(self, num, start, end):
-        return (num > start and num < end) if end > start else return (num > start or num < end)
+        if start < end:
+            return start < num and num < end
+        else:
+            return start < num or num < end
 
     def hash(self, datum):
         return hashlib.sha1(datum)
 
-    def __init__(self, bitwidth, 
+    def __init__(self, bitwidth
         self.system_bitwidth = bitwidth
-        self.node_id = self.hash(utils.myip()) % 2 ** m
+        self.nodeid = self.hash(utils.myip()) % 2 ** self.system_bitwidth
         self.fingers = [FingerTableEntry(self.nodeid + 2 ** i, cxn_timeout) for i in range(self.system_bitwidth)]
         self.pred = None
         #self.start # I don't think we know our own start
@@ -55,11 +58,13 @@ class ChordClient:
             liaison = RPCClient(lambda peers: random.choice([node for node in peers if self.cluster_name in node.project]))
             self.fingers[0].bind(liaison.lookup(self.nodeid + 1)) # fix successor
             # NOTE: pred stays None: perioidic stabilizes will fix this later
-        except: # node is first member of chord cluster
+        except IndexError: # could not choose from peers because node is first member of chord cluster
             # NOTE: FingerTableEntry creates a socket: is it fine to have the same process at both ends of a socket?
             # https://stackoverflow.com/a/8118180 suggests YES, fine
             # Not sure we get any actual benefit from this besides uniform handling of degenerate case
             self.fingers[0].bind(self.nodeid)
+        except ConnectionError:
+            self.join()
 
     # Iterative lookup: return next node to talk to (if that person is me -- same node twice in a row, HTC will get the value from me)
     #   - just return from cpf
@@ -113,7 +118,7 @@ class ChordClient:
         self.leaving = True # tells listener to respond as if node had left the network
 
     def fixer(self):
-        while True:
+        while not self.leaving:
             sleep(self.fixer_timeout)
             self.fix_finger()
 
@@ -127,7 +132,7 @@ class ChordClient:
                 self.fingers[fgr_idx + i] = self.fingers[fgr_idx] # share socket/finger table entries between fingers?
 
     def stabilizer(self):
-        while True:
+        while not self.leaving:
             sleep(self.stabilizer_timeout)
             self.stabilize()
 
@@ -142,9 +147,8 @@ class ChordClient:
             self.fingers[0].bind(self.succlist[0]) # also use succclients to populate FingerTableEntry
             return stabilize() # retry stabilization
         # TODO: modular arithmetic
-        if nodeid < succ_pred and < succ_pred < self.fingers[0].nodeid: # maybe cache successor's nodeid? can't change unless we change whole succ
+        if self.inrange(succ_pred, nodeid, self.fingers[0].nodeid):
             self.fingers[0].bind(succ_pred)
-            self.succ
 
         try:
             self.fingers[0].rpc.suspected_predecessor(self.nodeid)

@@ -63,6 +63,16 @@ def extract_doc(obj):
         for method_name in dir(obj) if callable(method := getattr(obj, method_name)) and not method_name.startswith("_")
     }
 
+def myip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    myip = s.getsockname()[0]
+    s.close()
+    return myip
+
+def eq(x):
+    return lambda y: x == y
+
 # a la https://stackoverflow.com/a/22498708
 from threading import Thread, Event
 def repeat(fxn, every):
