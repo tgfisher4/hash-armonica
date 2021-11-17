@@ -69,6 +69,16 @@ def extract_doc(obj):
         for method_name in dir(obj) if callable(method := getattr(obj, method_name)) and not method_name.startswith("_")
     }
 
+# a la https://stackoverflow.com/a/22498708
+from threading import Thread, Event
+def repeat(fxn, every):
+    stopped = Event()
+    def do():
+        while not stopped.wait(interval):
+            fxn()
+    Thread(target=do).start()
+    return stopped.set
+
 # Utility networking functions
 ''' Fundamental packet read/writes are implemented as file read/writes.
     Files were decided to be the least common denominator because most

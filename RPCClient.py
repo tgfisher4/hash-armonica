@@ -5,21 +5,25 @@ import importlib
 import http.client
 
 class RPCClient:
-    def __init__(self, name=None, timeout=None, verbose=False): 
+    def __init__(self, name_selector, timeout=None, verbose=False): 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.settimeout(timeout)
         self.server_msgs = utils.nl_socket_messages(self.server_socket) # iterator through messages received over socket
         self.verbose = verbose
         self.catalog_url = "catalog.cse.nd.edu:9097/query.json"
-        self.name = name
+        self.name_selector = name_selector
         self.connected = False # delay connection lazily until needed
+        self.catalog = NDCatalog.NDCatalog()
 
     def __del__(self):
         # When deleted/garbage collected, be sure to close socket
         self.server_socket.close()
 
-    def catalog_lookup(self, name):
+    def catalog_lookup(self, picker):
         ''' Look up other node's address from catalog ''' 
+        server_info = picker(self.catalog.query())
+        return server_info['address'], int(server_info['port'])
+
         # Assumes url includes port and file
         host, rest = self.catalog_url.split(":")
         port, filename = rest.split('/', maxsplit=1)
@@ -41,7 +45,7 @@ class RPCClient:
             Requires a connection to have been previously established via connect.
         '''
         if not self.connected:
-            addr = self.catalog_lookup(self.name)
+            addr = self.catalog_lookup(self.name_selector)
             try:
                 self.connect(*addr)
             except Exception:
