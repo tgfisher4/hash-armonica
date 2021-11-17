@@ -21,7 +21,9 @@ class FingerTableEntry:
 
 
 class ChordClient:
+    # add/subtract 1 from start/end to determine where the = goes (integers)
     def inrange(self, num, start, end):
+        return (num > start and num < end) if end > start else return (num > start or num < end)
 
     def hash(self, datum):
         return hashlib.sha1(datum)
@@ -59,51 +61,28 @@ class ChordClient:
             # Not sure we get any actual benefit from this besides uniform handling of degenerate case
             self.fingers[0].bind(self.nodeid)
 
+    # Iterative lookup: return next node to talk to (if that person is me -- same node twice in a row, HTC will get the value from me)
+    #   - just return from cpf
+    # Recursive lookup:
+    #   - benefit: sockets already open
     def lookup(self, key):
-        hashed_key = self.hash(key) % 2 ** m
+        hashed_key = self.hash(key) % (2 ** self.system_bitwidth)
         node = self
         nodeid = self.nodeid
-        # Failure handling:
-        # If node down, find cpf(node).
-        #   If this one is up, continue
-        # If cpf(node) is down, look up cpf(cpf(node))?
-        # 
-        # If node down, try node = self.cpf(node)
-        # Q: how to ensure we are making progress?
-        # This way, I am worried about loop:
-        #   - A contacts B, A's A.cpf(key), and B recommends C = B.cpf(key)
-        #   - A cannot contact C
-        #   - so, A contacts A.cpf(C) = B, asks for recommendation. recommends C
-        # In essence: do we ever go back to the node we previously tried to talk to?
-        # If we introduce memory of last node, we now need to worry about both failing
-        # Should always be able to make progress by chaining succ's,
-        # but how to detect when we are not making progress via FT?
-        # Remembering last node:
-        #   - contact self.cpf(key). they recommend node
-        #   - if node down,
-        #       - ask pvsnode for cpf(node). They are likely to have better answer than us (closer)
-        #       - note that every cpf call should walk us pvs.fgrtbl. each call gets us one finger earlier
-        #       - if we reach pvs.cpf(node) = pvs, then pvs's succ has failed and this lookup has failed
-        #   - now, what if node down and pvs down before we can contact one of its fingers? Ideally, want to go to pvs^2 to ask for new anchor in 
-        #   - the length of the stack this constructs will be n-1 in degenerate case: is this too much mem?
-        #   - could also, if we reach pvs.cpf(node) = pvs, backtrack to pvs^2 and hope it has better info
-        #   - could also, if pvs fails while we need it, could just fail on the spot and ask for retry in a few seconds: gives other's time to stabolize
-        while key not in range
+        prev_nodeid = -1
+        
+        while nodeid != prev_nodeid:
+            prev_nodeid = nodeid
             try:
-                nodeid = node.closest_preceding_finger(key)
+                nodeid = node.closest_preceding_finger(hashed_key) # return nodeid instead to find connection
             except ConnectionError:
-                # what now?
-                # let's check our own finger table for node preceding the one we were trying to talk to
-                # Is this guaranteed to get us where we need to go?
-                # What if we keep asking the same node for info and it keeps giving us the same crashed node?
-                # In this case, ask for their finger that procedes the one they keep referring us to: nodeid closest pred
-                # if nodeid closest pred IS the node we're talking to, this seems to indicate it does not have its succ in order and we should fail
-                # In this case, we walk down the finger table of the last contacted node until we get a 
-                # What if this other node fails?
-                # Worried about:
-                # 
-                # If someone's succ is down, need to wait for them to stabilize: fail
-
+                # Node down...find cpf(cpf(node)) and so on
+                nodeid = last_node.closest_preceding_finger(nodeid-1)
+                # If successor is down wait for next stabilize() and retry
+                if nodeid == prev_nodeid:
+                    # Failed lookup; retry 
+                    time.sleep(10)
+                    return self.lookup(key)
 
             # TODO: optimize to use already established cxn, if available
             # To achieve this, might be nice to have a fingertable class which maintains a list and a dict
@@ -111,15 +90,23 @@ class ChordClient:
             # Supports indexing with nodeids via __getindex__/__setindex__,
             # and also supports use of 'in' with __contains__.
             # Problem: distinguishing nodeid access vs fgr_idx access
+
+            last_node = node
             node = RPCClient(utils.eq(self.cluster_name + nodeid))
         return nodeid
 
-    def closest_preceding_finger
-        #TODO: modular arithmetic
-        for i in range(self.bidwidth-1, -1, -1):
-            if key > fingers[i].start:
-                return fingers[i]
-        return self # otherwise its behind you: also, do we need to do some modular arithmetic - ex: you are at 6, keyspace is 0 - 7. your 1st cxn is 7, but second is 1. So if you want to look up 0, need to look > 7 (-1), < 1
+    def closest_preceding_finger(self, key):
+        # Logic (see p.249 in textbook)
+        if self.inrange(key, self.pred.nodeid, self.nodeid+1):
+            return self.nodeid # we are responsible
+        
+        if self.inrange(key, self.nodeid, self.fingers[0].nodeid+1):
+            return self.fingers[0].nodeid # successor is responsible
+
+        # Find cpf to talk to for more accurate info
+        for i in range(self.system_bidwidth):
+            if self.inrange(key, self.fingers[i].nodeid-1, self.fingers[(i+1)%self.system_bitwidth].nodeid):
+                return self.fingers[i].nodeid
 
     def leave(self):
         # any implementation at the chord client level? maybe flip on "leaving" switch?
