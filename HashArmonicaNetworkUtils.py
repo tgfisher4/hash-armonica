@@ -52,15 +52,9 @@ def params_of_code(code):
     return [ param for param in code.co_varnames[:code.co_argcount] if param != 'self' ]
 
 def execute_operation(oper, obj):
-    try: # Assume operation spec has proper shape
-        method = oper['method']
-        fxn = getattr(obj, method) # May raise uncaught AttributeError
-        arg_dict = oper['arguments']
-        arg_list = [ arg_dict[key] for key in params_of_fxn(fxn) ] # raises exc if args don't match those in docs
-    except (KeyError, TypeError): # Catch missing keys or wrongly typed values
-        raise RequestFormatError(obj)
-
-    return fxn(*arg_list) # Any exceptions from operation itself are not caught
+    # May raise Attribute error if method doesn't exist
+    # May also raise TypeError if wrong # args, or any number of errors from fxn
+    return getattr(obj, oper['method'])(*oper['arguments'])
 
 def extract_doc(obj):
     return {
