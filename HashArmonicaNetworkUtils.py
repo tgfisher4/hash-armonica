@@ -2,7 +2,7 @@ import socket
 import json
 import sys
 
-''' HashTableNetworkUtils provides common, opinionated networking utilities that both the client and server RPC stubs utilize.
+''' HashArmonicaNetworkUtils provides common, opinionated networking utilities that both the client and server RPC stubs utilize.
     Here, we encapsulate our networking protocol, by which we mean how a message should be formatted over a TCP stream, and not the exact format of the message.
     We define a message to be a Python JSON parsable object.
     But again, these networking utilities merely provide convenience functions to send and receive such messages, but place no restrictions on the contents of the message itself (is it a dictionary? an array? what should the message shape be?).
@@ -91,19 +91,12 @@ def nl_messages(get_fxn):
     # Use generator to maintain state between calls in case we receive too many bytes.
     # E.g.: many messages waiting to be received, many fitting within 1024 bytes.
     #print("generator init")
-    extra = b'' 
-    while True:
-        pieces = extra.split(b'\n', maxsplit=1) # Removes newline
-        msg = pieces[0] if len(pieces) > 1 else None
-        rest = pieces[-1]
-        if msg:
-            extra = rest
-            yield msg
-            continue
-        piece = get_fxn()
-        if len(piece) == 0:
-            return
+    extra = b''
+    while piece := get_fxn():
         extra += piece
+        while b'\n' in extra:
+            msg, extra = extra.split(b'\n', maxsplit=1)
+            yield msg            
 
 def nl_file_messages(from_file):
     ''' Reads a newline delimited message from a file. '''

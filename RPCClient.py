@@ -1,34 +1,33 @@
 import HashTableNetworkUtils as utils
-import HashTableRPCDoc
 import socket
 import json
 import importlib
 import http.client
 
-class HashTableClient:
+class RPCClient:
     def __init__(self, name=None, timeout=None, verbose=False): 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.settimeout(timeout)
-        self.server_msgs = utils.nl_socket_messages(self.server_socket)
+        self.server_msgs = utils.nl_socket_messages(self.server_socket) # iterator through messages received over socket
         self.verbose = verbose
         self.catalog_url = "catalog.cse.nd.edu:9097/query.json"
         self.name = name
-        #self.connect(*self.catalog_lookup(self.name)) # Connect during initialization
         self.connected = False # delay connection lazily until needed
 
     def __del__(self):
-        # When HashTableClient deleted/garbage collected, be sure to close socket
+        # When deleted/garbage collected, be sure to close socket
         self.server_socket.close()
 
     def catalog_lookup(self, name):
+        ''' Look up other node's address from catalog ''' 
+        # Assumes url includes port and file
         host, rest = self.catalog_url.split(":")
         port, filename = rest.split('/', maxsplit=1)
         port = int(port)
-        filename = f'/{filename}'
         cxn = http.client.HTTPConnection(host, port)
-        cxn.request('GET', filename)
+        cxn.request('GET', f'/{filename}')
         rsp = json.loads(cxn.getresponse().read())
-        server_info = max((entry for entry in rsp if entry.get('project') == name and entry.get('type') == 'hashtable'), key = lambda x: x['lastheardfrom']) 
+        server_info = max((entry for entry in rsp if name == entry.get('project'), key = lambda x: x['lastheardfrom'])
         return server_info['address'], int(server_info['port'])
 
     def connect(self, host, port):
@@ -49,21 +48,14 @@ class HashTableClient:
                 if self.verbose: print(f'[{self.name}] Failed to connect')
                 raise ConnectionError
 
+        # Ultra generalist approach: just pass a message invokation with an ordered list of its arguments
+        # Server will handle/return attr/type errors
         try:
-            #TODO: too general to remove notion of doc here and just pass a message invokation with no args, possibly relying on an ordered list instead, to server?
-            # Then, could have server handle/return the attribute/type errors
-            # But at that point, this isn't really a HashTableClient so much as a general RPCClient (is that bad?)
             if self.verbose:
                 print(f'[{self.name}] RPC invoked: {method}({", ".join(map(str, args))})')
-            method_args = HashTableRPCDoc.doc[method]
-            if len(method_args) != len(args):
-                raise TypeError(f'{method}() takes {len(method_args)} arguments but {len(args)} {"was" if len(args) == 1 else "were"} given.')
             request = {
                 'method': method,
-                'arguments': {
-                    arg: args[i]
-                    for i, arg in enumerate(method_args)
-                }
+                'arguments': args
             }
             try:
                 encoded_message = utils.encode_object(request)
@@ -100,7 +92,7 @@ class HashTableClient:
                     raise RuntimeError(f'{error_name}: {response["description"]}')
                 raise e
 
-        except (ConnectionError, socket.timeout, StopIteration): # stop iteration in case the next client message is not available bc connection closed
+        except (ConnectionError, socket.timeout, StopIteration): # StopIteration in case the next client message is not available bc connection closed
             if self.verbose: print(f'[{self.name}] Connection lost')
             self.connected = False
             raise ConnectionError
@@ -113,6 +105,6 @@ class HashTableClient:
             to pass a message to the server to perform that operation on the actual hash table.
         '''
 
-        if attr in HashTableRPCDoc.doc:
-            return lambda *args: self._rpc(attr, args)
-        raise AttributeError(f"'HashTable' object has no attribute {attr}")
+        #if attr not in dir(self):
+        return lambda *args: self._rpc(attr, args)
+        #raise AttributeError(f"'HashTable' object has no attribute {attr}")
