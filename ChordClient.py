@@ -3,6 +3,7 @@ import RPCClient
 import hashlib
 import NDCatalog
 import threading
+import time
 
 # Might be worth taking notes from
 # https://cit.dixie.edu/cs/3410/asst_chord.html
@@ -31,25 +32,31 @@ class ChordClient:
     def hash(self, datum):
         return hashlib.sha1(datum)
 
-    def __init__(self, bitwidth
+    def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, failure_timeout=10, verbose=False):
+        if cluster_name is None:
+            return ValueError("keyword argument cluster_name must be supplied")
         self.system_bitwidth = bitwidth
-        self.nodeid = self.hash(utils.myip()) % 2 ** self.system_bitwidth
-        self.fingers = [FingerTableEntry(self.nodeid + 2 ** i, cxn_timeout) for i in range(self.system_bitwidth)]
+        self.nodeid = self.hash(utils.myip()) % (2 ** self.system_bitwidth)
+        self.fingers = [FingerTableEntry(cluster_name, (self.nodeid + 2 ** i) % (2 ** self.bitwidth), failure_timeout) for i in range(self.system_bitwidth)]
         self.pred = None
-        #self.start # I don't think we know our own start
-        self.succlist = [None for _ in range(succlistlen)]
-        self.cluster_name = cluster_name # armonica pun here?
+        self.succlist = []
+        self.succlistlen = succlistlen
+        self.cluster_name = cluster_name 
         self.leaving = False
+        self.verbose = verbose
 
-        # Join before resistering: otherwise, other nodes seeking to join may ask us to perform a lookup for them, which we cannot do unless we've joined ourselves
+        # Join before we listen/register
+        # Otherwise, other nodes seeking to join may ask us to perform a lookup for them, which we cannot do unless we've joined ourselves
         self.join()
         self.catalog = NDCatalog.NDCatalog() # save to instance variable so it doesn't go out of scope and get garbage collected
-        self.catalog.register('chord', self.cluster_name + self.nodeid, 'tfisher4') # Spawns registration thread
+        #self.catalog.register('chord', self.cluster_name + self.nodeid, 'tfisher4') # Spawns registration thread
         # Start listening before stabilizing because the initial stabilization is how other nodes learn of us.
         # We should be listening before they try to contact us, lest they think we're dead.
-        threading.Thread.start(target=server).start() # Start listening
-        threading.Thread.start(target=stabilizer).start() # Start stabilizing periodically
-        threading.Thread.start(target=fixer).start() # Start fixing fingers periodically
+        threading.Thread(target=server).start() # Start listening
+        self.stabilizer_timeout = stabilizer_timeout
+        threading.Thread(target=stabilizer).start() # Start stabilizing periodically
+        self.fixer_timeout = fixer_timeout
+        threading.Thread(target=fixer).start() # Start fixing fingers periodically
 
     def join(self):
         # Find an existing node in cluster via catalog.
@@ -102,7 +109,7 @@ class ChordClient:
 
     def closest_preceding_finger(self, key):
         # Logic (see p.249 in textbook)
-        if self.inrange(key, self.pred.nodeid, self.nodeid+1):
+        if self.inrange(key, self.pred, self.nodeid+1):
             return self.nodeid # we are responsible
         
         if self.inrange(key, self.nodeid, self.fingers[0].nodeid+1):
@@ -126,27 +133,26 @@ class ChordClient:
         fgr_idx = random.choice([i for i, fgr in enumerate(self.fingers)])
         corr_fgr = self.lookup(self.fingers[i].start)
         if corr_fgr != self.fingers[fgr_idx].nodeid:
-            self.fingers[fgr_idx] = FingerTableEntry(...)
+            self.fingers[fgr_idx].bind(corr_fgr)
             # correct as many fingers as able at the current time
-            while still succ:
+            i = 1
+            while self.inrange(corr_fgr, (self.nodeid + 2 ** (fgr_idx+i)) % (2 ** self.bidwidth), self.fingers[fgr_idx+i].nodeid):
                 self.fingers[fgr_idx + i] = self.fingers[fgr_idx] # share socket/finger table entries between fingers?
+                i += 1
 
     def stabilizer(self):
         while not self.leaving:
             sleep(self.stabilizer_timeout)
             self.stabilize()
 
-    def stabilize(self)
-        # TODO: handle failure of successor
-        # specifically with RPC client, how do we expect errors to propogate
+    def stabilize(self):
         try:
             succ_pred = self.fingers[0].rpc.predecessor()
         except ConnectionError:
             del(self.succclients[self.succlist[0]])
             self.succlist = self.succlist[1:]
             self.fingers[0].bind(self.succlist[0]) # also use succclients to populate FingerTableEntry
-            return stabilize() # retry stabilization
-        # TODO: modular arithmetic
+            return self.stabilize() # retry stabilization
         if self.inrange(succ_pred, nodeid, self.fingers[0].nodeid):
             self.fingers[0].bind(succ_pred)
 
@@ -158,12 +164,15 @@ class ChordClient:
             del(self.succclients[self.succlist[0]])
             self.succlist = self.succlist[1:]
             self.fingers[0] = self.succlist[0] # also use succclients to populate FingerTableEntry
-            return stabilize() # retry stabilization
+            return self.stabilize() # retry stabilization
 
         # Also maintain succlist
         # naive: reconstruct whole succlist
         # better (not my idea): copy succ's succlist
-        new_succidlist = [self.fingers[0].nodeid] + self.fingers[0].rpc.succlist()[:-1] #always chop or just sometimes?
+        succ_succlist = self.fingers[0].rpc.succlist()
+        # Only chop off end if spilling over: faciliates build up of succlist in small cluster cases
+        truncated_succ_succlist = succ_succlist[:min(len(succ_succlist), self.succlistlen-1)]
+        new_succidlist = [self.fingers[0].nodeid] + truncated_succ_succlist
         # maintain succclients LUT so we don't have to recreate RPCs/sockets for connections we already have
         new_succlist = [
             self.succclients.get(nodeid, FingerTableEntry(nodeid))
@@ -173,13 +182,13 @@ class ChordClient:
             fte.nodeid: fte
             for fte in new_succlist
         }
-        higher_level_succlist_changed_handler(self.succlist, new_succlist)
+        #higher_level_succlist_changed_handler(self.succlist, new_succlist)
         self.succlist = new_succlist #     together, lose references to obsolete rpcs, closing sockets
         self.succclients = new_succclients
 
 
-    def suspected_predecessor(self, nodeid)
-        if self.pred is None or self.pred < src and src < self.nodeid:
+    def suspected_predecessor(self, nodeid):
+        if self.pred is None or self.inrange(src, self.pred, self.nodeid):
             self.pred = src
 
     def predecessor(self): return self.pred
@@ -205,7 +214,7 @@ class ChordClient:
         new_cxns.listen()
         self.port = new_cxns.getsockname()[1]
         if self.verbose: print(f'Listening on port {self.port}...')
-        self.catalog.register() # NOTE: register here or in constructer?
+        self.catalog.register('chord', self.cluster_name + self.nodeid, 'tfisher4') # Spawns registration thread
         if self.verbose: print(f'Registered as {self.name} to catalog service...')
         while True: # Poll forever
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
