@@ -70,15 +70,15 @@ def myip():
     s.close()
     return myip
 
-def eq(x):
-    return lambda y: x == y
+def project_eq(x):
+    return lambda itr: next(filter(lambda y: x == y.get('project'), itr))
 
 # a la https://stackoverflow.com/a/22498708
 from threading import Thread, Event
 def repeat(fxn, every):
     stopped = Event()
     def do():
-        while not stopped.wait(interval):
+        while not stopped.wait(every):
             fxn()
     Thread(target=do).start()
     return stopped.set

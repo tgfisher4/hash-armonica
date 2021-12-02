@@ -1,19 +1,29 @@
-import HashTableNetworkUtils as utils
+import HashArmonicaUtils as utils
+from NDCatalog import NDCatalog
 import socket
 import json
 import importlib
 import http.client
 
 class RPCClient:
-    def __init__(self, name_selector, timeout=None, verbose=False): 
+    def __init__(self, chooser=None, addr=None, timeout=None, verbose=False, lazy=True):
+        if chooser is not None:
+            self.chooser = chooser
+            self.catalog = NDCatalog()
+            self.addr = None
+            self.name = None
+        elif addr is not None:
+            self.addr = addr
+            self.chooser = None
+            self.name = ':'.join(map(str, addr))
+        else:
+            raise ValueError("Must specify one of chooser and addr kwargs")
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.settimeout(timeout)
         self.server_msgs = utils.nl_socket_messages(self.server_socket) # iterator through messages received over socket
         self.verbose = verbose
         self.catalog_url = "catalog.cse.nd.edu:9097/query.json"
-        self.name_selector = name_selector
         self.connected = False # delay connection lazily until needed
-        self.catalog = NDCatalog.NDCatalog()
 
     def __del__(self):
         # When deleted/garbage collected, be sure to close socket
@@ -22,6 +32,7 @@ class RPCClient:
     def catalog_lookup(self, picker):
         ''' Look up other node's address from catalog ''' 
         server_info = picker(self.catalog.query())
+        self.name = server_info.get('project', server_info.get('type'))
         return server_info['address'], int(server_info['port'])
 
         # Assumes url includes port and file
@@ -31,11 +42,12 @@ class RPCClient:
         cxn = http.client.HTTPConnection(host, port)
         cxn.request('GET', f'/{filename}')
         rsp = json.loads(cxn.getresponse().read())
-        server_info = max((entry for entry in rsp if name == entry.get('project'), key = lambda x: x['lastheardfrom'])
+        server_info = max((entry for entry in rsp if name == entry.get('project')), key = lambda x: x['lastheardfrom'])
         return server_info['address'], int(server_info['port'])
 
     def connect(self, host, port):
         ''' Connect to <host>:<port> for future RPC invocations. '''
+        if self.verbose: print(f"Connecting to {host}:{port}")
         self.server_socket.connect((host, port))
         self.connected = True
         if self.verbose: print(f'[{self.name}] Successfully connected to {host}:{port}')
@@ -45,7 +57,7 @@ class RPCClient:
             Requires a connection to have been previously established via connect.
         '''
         if not self.connected:
-            addr = self.catalog_lookup(self.name_selector)
+            addr = self.addr if self.addr else self.catalog_lookup(self.chooser)
             try:
                 self.connect(*addr)
             except Exception:
