@@ -228,10 +228,16 @@ class ChordClient:
             nodeid: self.succclients.get(nodeid, FingerTableEntry(nodeid, None, timeout=self.failure_timeout, verbose=self.verbose))
             for nodeid in new_succlist
         }
-        #higher_level_succlist_changed_handler(self.succlist, new_succlist)
         if self.verbose: print(f"Change succlist {self.succlist} --> {new_succlist}...")
-        self.succlist = new_succlist 
+        # Update in-place so that current iterator references to the list reflect the updates made,
+        # if stabilize preempts the thread and changes the succlist.
+        # Also important is that we perform the update before upcalling to HashArmonica to ensure
+        # specifically so that we change our list of successors before telling old succlist members
+        # to drop their associated replicas.
+        for i, new_succ in enumerate(new_succlist):
+            self.succlist[i] = new_succ
         self.succclients = new_succclients # lose references to obsolete rpcs, closing sockets
+        #higher_level_succlist_changed_handler(self.succlist, new_succlist)
 
 
     def suspected_predecessor(self, src):
