@@ -251,3 +251,78 @@ def err_desc(err):
             err_desc(KeyError('string')) =  'string'.
     '''
     return str(err) if type(err) is not KeyError else ",".join(map(str, err.args))
+
+
+
+
+
+''' Server 
+'''
+class Server():
+    def __init__(self, program):
+        # open listening socket
+        new_cxns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        socket_to_addr = {new_cxns: None}
+        socket_to_msgs = {}
+        # socket cxt mgr forces harder to read level of indentation: TODO: cleanup socket, then, in destructor
+        new_cxns.bind((socket.gethostname(), 0))
+        new_cxns.listen()
+        program.port = new_cxns.getsockname()[1]
+        if program.verbose: print(f'Listening on port {self.port}...')
+        if program.catalog:
+            program.catalog.register('chord', program.cluster_name + str(program.nodeid), program.port, 'tfisher4') # Spawns registration thread
+        if program.verbose: print(f'Registered as {self.cluster_name+str(self.nodeid)} to catalog service...')
+        while True: # Poll forever
+            readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
+            for rd_skt in readable:
+                if socket_to_addr[rd_skt] is None:
+                    new_skt, addr = new_cxns.accept()
+                    socket_to_addr[new_skt] = addr
+                    socket_to_msgs[new_skt] = nl_socket_messages(new_skt)
+                    if program.verbose: print(f'Accepted connection with {addr[0]}:{addr[1]}...')
+                    continue
+                addr = socket_to_addr[rd_skt]
+                    
+                try: # Assume cxn unbreakable, client waiting for rsp
+                    try: # Assume request is valid JSON in correct format corresponding to valid operation 
+                        try: # Assume request is valid JSON encoded via utf-8
+                            request = decode_object(next(socket_to_msgs[rd_skt]))
+                        except RequestFormatError as e:
+                                raise BadRequestError(e)
+                        if program.verbose: print(f'Received request {request} from {addr[0]}:{addr[1]}...')
+                        res = self.dispatch(program, request)
+                    except BadRequestError as e:
+                        res = e
+                    rsp = self.build_response(res)
+                    send_nl_message(rd_skt, encode_object(rsp))
+                    if program.verbose: print(f'Sent response {rsp} to {addr[0]}:{addr[1]}...')
+                except (ConnectionError, StopIteration):
+                    if program.verbose: print(f'Lost connection with {addr[0]}:{addr[1]}.')
+                    rd_skt.close()
+                    socket_to_addr.pop(rd_skt)
+                    socket_to_msgs.pop(rd_skt)
+                # Other exceptions are unexpected: let them run their course
+        new_cxns.close()
+
+    def dispatch(self, program, request):
+        ''' Process request <req_obj> by dispatching to appropriate method. '''
+        try:
+            return execute_operation(request, program)
+        except Exception as e:
+            raise BadRequestError(e)
+
+    def build_response(self, result):
+        ''' Builds a response object from a result.
+            A result may either be a BadRequestError wrapping an underlying error,
+            or the result returned by a valid operation.
+        '''
+        if isinstance(result, BadRequestError):
+            cause = result.cause
+            return {
+                'status': f'{type(cause).__module__}.{type(cause).__name__}', # Identify error to be raised client-side
+                'description': err_desc(cause) # Pass also the error description to report client-side
+            }
+        return {
+            'status': 'success',
+            'result': result
+        }
