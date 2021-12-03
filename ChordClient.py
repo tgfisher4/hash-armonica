@@ -45,7 +45,7 @@ class ChordClient:
         the_hash.update(data)
         return int.from_bytes(the_hash.digest(), byteorder="big")
 
-    def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False):
+    def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, callback_fxn=None):
         if cluster_name is None:
             raise ValueError("keyword argument cluster_name must be supplied")
         self.system_bitwidth = bitwidth
@@ -61,6 +61,7 @@ class ChordClient:
         self.leaving = False
         self.verbose = verbose
         self.failure_timeout = failure_timeout
+        self.callback_fxn = callback_fxn
 
         # We actually need to register first, before we join.
         # This is for the case that we are the first node to join the cluster.
@@ -221,23 +222,32 @@ class ChordClient:
         # better (not my idea): copy succ's succlist
         succ_succlist = self.fingers[0].rpc.successor_list()
         # Only chop off end if spilling over: faciliates build up of succlist in small cluster cases
-        truncated_succ_succlist = succ_succlist[:min(len(succ_succlist), self.succlistlen-1)]
-        new_succlist = [self.fingers[0].nodeid] + truncated_succ_succlist
-        # maintain succclients LUT so we don't have to recreate RPCs/sockets for connections we already have
+        truncated_succ_succlist_ids = succ_succlist[:min(len(succ_succlist), self.succlistlen-1)]
+
+        new_succlist_ids = [self.fingers[0].nodeid] + truncated_succ_succlist
         new_succclients = {
             nodeid: self.succclients.get(nodeid, FingerTableEntry(nodeid, None, timeout=self.failure_timeout, verbose=self.verbose))
-            for nodeid in new_succlist
+            for nodeid in new_succlist_ids
         }
+        new_succlist = [
+            new_succclients[nodeid]
+            for nodeid in new_succlist_ids
+        ]
+        # maintain succclients LUT so we don't have to recreate RPCs/sockets for connections we already have
         if self.verbose: print(f"Change succlist {self.succlist} --> {new_succlist}...")
         # Update in-place so that current iterator references to the list reflect the updates made,
         # if stabilize preempts the thread and changes the succlist.
         # Also important is that we perform the update before upcalling to HashArmonica to ensure
         # specifically so that we change our list of successors before telling old succlist members
         # to drop their associated replicas.
+        # First, make a copy of the old_succlist
+        old_succlist = self.succlist.copy()
         for i, new_succ in enumerate(new_succlist):
             self.succlist[i] = new_succ
-        self.succclients = new_succclients # lose references to obsolete rpcs, closing sockets
-        #higher_level_succlist_changed_handler(self.succlist, new_succlist)
+        # lose references to obsolete rpcs, closing sockets
+        self.succclients = new_succclients
+        
+        self.callback_fxn(old_succlist, new_succlist)
 
 
     def suspected_predecessor(self, src):
