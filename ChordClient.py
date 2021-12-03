@@ -13,10 +13,11 @@ import select
 # https://cit.dixie.edu/cs/3410/asst_chord.html
 
 class FingerTableEntry:
-    def __init__(self, cluster_name, start, timeout, verbose=False):
+    def __init__(self, cluster_name, start, timeout, verbose=False, suffix=''):
         self.nodeid = None
         self.rpc = None
         self.cluster_name = cluster_name
+        self.suffix = suffix
         self.start = start # cache to prevent unnecessary "pows" - doesn't seem to help that much: powers of 2 ez to compute, addition ez too
         self.timeout = timeout
         self.verbose = verbose
@@ -28,8 +29,9 @@ class FingerTableEntry:
             'timeout': self.timeout,
         }
         if addr: kwargs['addr'] = addr
-        else: kwargs['chooser'] = utils.project_eq(self.cluster_name + str(self.nodeid))
+        else: kwargs['chooser'] = utils.project_eq(self.cluster_name + str(self.nodeid) + self.suffix)
         self.rpc = RPCClient(**kwargs)
+        return self
 
 
 class ChordClient:
@@ -45,13 +47,13 @@ class ChordClient:
         the_hash.update(data)
         return int.from_bytes(the_hash.digest(), byteorder="big")
 
-    def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, callback_fxn=None):
+    def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, callback_fxn=lambda x,y: None):
         if cluster_name is None:
             raise ValueError("keyword argument cluster_name must be supplied")
         self.system_bitwidth = bitwidth
         self.myip = utils.myip()
         self.nodeid = self.hash(self.myip.encode('utf-8')) % (2 ** self.system_bitwidth)
-        self.nodeid = 6 # TODO: CHANGE
+        #self.nodeid = 6 # TODO: CHANGE
         self.fingers = [FingerTableEntry(cluster_name, (self.nodeid + 2 ** i) % (2 ** self.system_bitwidth), failure_timeout, verbose=verbose) for i in range(self.system_bitwidth)]
         self.pred = None
         self.succlist = []
@@ -95,7 +97,7 @@ class ChordClient:
         # Find an existing node in cluster via catalog.
         # Make a random choice to hopefully distribute the load of bootstrapping joining nodes.
         try:
-            liaison = RPCClient(lambda peers: random.choice([node for node in peers if self.cluster_name in node.get('project', '') and not str(self.nodeid) in node.get('project', '')]))
+            liaison = RPCClient(lambda peers: random.choice([node for node in peers if self.cluster_name in node.get('project', '') and 'chordclient' in node.get('project', '') and not str(self.nodeid) in node.get('project', '')]))
             self.fingers[0].bind(liaison.lookup(self.nodeid + 1)) # fix successor
             if self.verbose: print(f"Successfully joined cluster with {self.fingers[0].nodeid} as successor...")
             # NOTE: pred stays None: perioidic stabilizes will fix this later
@@ -143,7 +145,7 @@ class ChordClient:
             # Problem: distinguishing nodeid access vs fgr_idx access
 
             last_node = node
-            node = RPCClient(utils.project_eq(self.cluster_name + str(nodeid)))
+            node = RPCClient(utils.project_eq(self.cluster_name + str(nodeid) + 'chordclient'))
         return nodeid
 
     def closest_preceding_finger(self, key):
@@ -224,9 +226,9 @@ class ChordClient:
         # Only chop off end if spilling over: faciliates build up of succlist in small cluster cases
         truncated_succ_succlist_ids = succ_succlist[:min(len(succ_succlist), self.succlistlen-1)]
 
-        new_succlist_ids = [self.fingers[0].nodeid] + truncated_succ_succlist
+        new_succlist_ids = [self.fingers[0].nodeid] + truncated_succ_succlist_ids
         new_succclients = {
-            nodeid: self.succclients.get(nodeid, FingerTableEntry(nodeid, None, timeout=self.failure_timeout, verbose=self.verbose))
+            nodeid: self.succclients.get(nodeid, FingerTableEntry(self.cluster_name, None, timeout=self.failure_timeout, verbose=self.verbose, suffix='chordclient').bind(nodeid))
             for nodeid in new_succlist_ids
         }
         new_succlist = [
@@ -243,7 +245,10 @@ class ChordClient:
         # First, make a copy of the old_succlist
         old_succlist = self.succlist.copy()
         for i, new_succ in enumerate(new_succlist):
-            self.succlist[i] = new_succ
+            if i >= len(self.succlist):
+                self.succlist.append(new_succ)
+            else:
+                self.succlist[i] = new_succ
         # lose references to obsolete rpcs, closing sockets
         self.succclients = new_succclients
         
@@ -251,6 +256,14 @@ class ChordClient:
 
 
     def suspected_predecessor(self, src):
+        # ping pred to ensure alive
+        try:
+            FingerTableEntry(self.cluster_name, None, self.failure_timeout).bind(src).rpc.successor()
+        except ConnectionError:
+            if self.verbose: print(f"Unable to contact pred, accepting node {src} as pred")
+            self.pred = src
+            return
+
         if self.pred is None or self.pred == self.nodeid or self.inrange(src, self.pred, self.nodeid):
             if self.verbose: print(f"Contacted by better predecessor ({self.pred} --> {src})...")
             self.pred = src
@@ -280,8 +293,8 @@ class ChordClient:
         new_cxns.listen()
         self.port = new_cxns.getsockname()[1]
         if self.verbose: print(f'Listening on port {self.port}...')
-        self.catalog.register('chord', self.cluster_name + str(self.nodeid), self.port, 'tfisher4') # Spawns registration thread
-        if self.verbose: print(f'Registered as {self.cluster_name+str(self.nodeid)} to catalog service...')
+        self.catalog.register('chord', self.cluster_name + str(self.nodeid) + 'chordclient', self.port, 'tfisher4') # Spawns registration thread
+        if self.verbose: print(f'Registered as {self.cluster_name+str(self.nodeid)}chordclient to catalog service...')
         while True: # Poll forever
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
             for rd_skt in readable:

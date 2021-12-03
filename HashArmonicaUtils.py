@@ -1,6 +1,7 @@
 import socket
 import json
 import sys
+import select
 
 ''' HashArmonicaNetworkUtils provides common, opinionated networking utilities that both the client and server RPC stubs utilize.
     Here, we encapsulate our networking protocol, by which we mean how a message should be formatted over a TCP stream, and not the exact format of the message.
@@ -259,7 +260,7 @@ def err_desc(err):
 ''' Server 
 '''
 class Server():
-    def __init__(self, program):
+    def __init__(self, program, proj_suffix=''):
         # open listening socket
         new_cxns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         socket_to_addr = {new_cxns: None}
@@ -269,8 +270,10 @@ class Server():
         new_cxns.listen()
         program.port = new_cxns.getsockname()[1]
         if program.verbose: print(f'Listening on port {self.port}...')
-        if program.catalog:
-            program.catalog.register('chord', program.cluster_name + str(program.nodeid), program.port, 'tfisher4') # Spawns registration thread
+        try:
+            program.catalog.register('chord', program.cluster_name + str(program.nodeid) + proj_suffix, program.port, 'tfisher4') # Spawns registration thread
+        except AttributeError:
+            pass
         if program.verbose: print(f'Registered as {self.cluster_name+str(self.nodeid)} to catalog service...')
         while True: # Poll forever
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
