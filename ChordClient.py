@@ -51,7 +51,7 @@ class ChordClient:
         self.system_bitwidth = bitwidth
         self.myip = utils.myip()
         self.nodeid = self.hash(self.myip.encode('utf-8')) % (2 ** self.system_bitwidth)
-        self.nodeid = 6 # TODO: CHANGE
+        #self.nodeid = 6 # TODO: CHANGE
         self.fingers = [FingerTableEntry(cluster_name, (self.nodeid + 2 ** i) % (2 ** self.system_bitwidth), failure_timeout, verbose=verbose) for i in range(self.system_bitwidth)]
         self.pred = None
         self.succlist = []
@@ -162,9 +162,12 @@ class ChordClient:
             return self.fingers[0].nodeid # successor is responsible
 
         # Find cpf to talk to for more accurate info
-        for i in range(self.system_bidwidth):
-            if self.inrange(key, self.fingers[i].nodeid-1, self.fingers[(i+1)%self.system_bitwidth].nodeid):
-                if self.verbose: print(f"I am recommending you talk to {self.fingers[i].nodeid} for more information...")
+        for i in range(self.system_bitwidth):
+            try:
+                if self.inrange(key, self.fingers[i].nodeid-1, self.fingers[(i+1)%self.system_bitwidth].nodeid):
+                    if self.verbose: print(f"I am recommending you talk to {self.fingers[i].nodeid} for more information...")
+                    return self.fingers[i].nodeid
+            except TypeError:
                 return self.fingers[i].nodeid
 
     def leave(self):
@@ -200,7 +203,7 @@ class ChordClient:
     def pop_succ(self):
         del(self.succclients[self.succlist[0]])
         self.succlist = self.succlist[1:]
-        self.fingers[0].rpc = self.succclients[self.succlist[0]] # also use succclients to populate FingerTableEntry
+        self.fingers[0] = self.succclients[self.succlist[0]] # also use succclients to populate FingerTableEntry
 
 
     def stabilize(self):
