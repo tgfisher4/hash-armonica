@@ -31,7 +31,11 @@ class RPCClient:
 
     def catalog_lookup(self, picker):
         ''' Look up other node's address from catalog ''' 
-        server_info = picker(self.catalog.query())
+        try:
+            server_info = picker(self.catalog.query())
+        except StopIteration:
+            if self.verbose: print(f"Couldn't find appropriate node in catalog")
+            raise ConnectionError
         self.name = server_info.get('project', server_info.get('type'))
         return server_info['address'], int(server_info['port'])
 
@@ -61,7 +65,7 @@ class RPCClient:
             try:
                 self.connect(*addr)
             except Exception:
-                if self.verbose: print(f'[{self.name}] Failed to connect')
+                if self.verbose: print(f'Failed to connect to {self.name}')
                 raise ConnectionError
 
         # Ultra generalist approach: just pass a message invokation with an ordered list of its arguments
