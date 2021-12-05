@@ -54,6 +54,7 @@ class RPCClient:
         if self.verbose: print(f"Connecting to {host}:{port}")
         self.server_socket.connect((host, port))
         self.connected = True
+        self.addr = (host, port)
         if self.verbose: print(f'[{self.name}] Successfully connected to {host}:{port}')
 
     def _rpc(self, method, args):

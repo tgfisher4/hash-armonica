@@ -14,7 +14,7 @@ import select
 
 # TODO: Node mutable or immutable (i.e., allow changes like bind?)
 class Node:
-    # packages a nodeid and connection together nicely
+    # packages a nodeid and rpcclient together nicely
     def __init__(self, nodeid, addr, timeout=5, verbose=False):
         self.nodeid = nodeid
         kwargs = {
@@ -24,6 +24,9 @@ class Node:
         }
         self.rpc = RPCClient(**kwargs)
         self.addr = self.rpc.addr
+
+    def __repr__(self):
+        return f'{self.nodeid}@{self.addr[0]}:{self.addr[1]}'
 
 class ChordClient:
     # add/subtract 1 from start/end to determine where the = goes (integers)
@@ -40,105 +43,115 @@ class ChordClient:
         the_hash.update(data)
         return int.from_bytes(the_hash.digest(), byteorder="big")
 
-    def finger_start(self, fgr_idx):
-        return (self.nodeid + 2 ** fgr_idx) % (2 ** self.system_bitwidth)
-
     def __init__(self, cluster_name=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, callback_fxn=lambda x,y: None):
         if cluster_name is None:
             raise ValueError("keyword argument cluster_name must be supplied")
         self.system_bitwidth = bitwidth
         self.myip = utils.myip()
-        self.nodeid = self.hash(self.myip.encode('utf-8')) % (2 ** self.system_bitwidth)
 
-        #self.nodeid = 6 # TODO: CHANGE
-        #self.fingers = [FingerTableEntry(cluster_name, (self.nodeid + 2 ** i) % (2 ** self.system_bitwidth), failure_timeout, verbose=verbose) for i in range(self.system_bitwidth)]
         self.fingers = [None for _ in range(self.system_bitwidth)]
         self.pred = None
-        self.succlist = []
-        self.succclients = {}
+        self.port = None
         self.succlistlen = succlistlen
+        self.succlist = [None for _ in range(self.succlistlen)]
         self.cluster_name = cluster_name 
         self.leaving = False
         self.verbose = verbose
         self.failure_timeout = failure_timeout
         self.callback_fxn = callback_fxn
-
         self.cxn_kwargs = {
             'timeout': self.failure_timeout,
             'verbose': self.verbose,
         }
 
-        # We actually need to register first, before we join.
-        # This is for the case that we are the first node to join the cluster.
-        # In this case, the join procedure creates an RPCClient to ourselves,
-        # for which it is necessary that our server information be documented in the catalog.
-        # To handle the case that for n > 1, other nodes may ask us to perform a lookup on their behalf,
-        # so that they may join the cluster, we simply rely on the fact that lookup sleeps while it cannot 
-        # serve the request. Thus, we simply delay our response until we have an answer.
-        # Also, start listening before stabilizing because the initial stabilization is how other nodes learn of us.
-        # We should be listening before they try to contact us, lest they think we're dead.
-
-
-        # Start listening first. This is so we can connect to ourselves later. Do not register yet.
-        # Then, join. If no catalog entries exist, we are the first node in the cluster.
-        # Then, create RPCClient to successor. If we are the first node, we are our own successor, so use our known host/port (not yet registered)
-        #   - doesn't seem there is anything preventing us from registering immediately after join
-        # Then, register.
-        # Then, start stabilizing. This ensures that if other nodes know of our existence (via stabilize), then they can contact us (via catalog).
-        self.catalog = NDCatalog() # save to instance variable so it doesn't go out of scope and get garbage collected
+        # First, start listening so we know our own port number to hash into our ip address.
+        # Also important to listen before stabilizing so that if other nodes learn of our existence via stabilize, then they can contact us
+        
+        # Start listening
         self.lookup_timeout = lookup_timeout
-        threading.Thread(target=self.server, daemon=True).start() # Start listening: fine to register
-        self.join() # Join, taking no catalog entries as the hint that we 
+        threading.Thread(target=self.server, daemon=True).start()
+        # Determine nodeid: allow multiple nodes on same machine by including port in address to be hashed
+        while not self.port: time.sleep(1)
+        self.nodeid = self.hash(f'{self.myip}:{self.port}'.encode('utf-8')) % (2 ** self.system_bitwidth)  
+        # Join
+        self.join() 
+        # Register with catalog (allows other nodes to use us to join system)
+        self.catalog = NDCatalog() # save to instance variable so it doesn't go out of scope and get garbage collected
+        project = f'{self.cluster_name}:{str(self.nodeid)}:{self.port}:chordclient'
+        self.catalog.register('chord', project, self.port, 'tfisher4') # Spawns registrar thread
+        if self.verbose: print(f'[Registrar] Registered as {project} to catalog service...')
+        # TODO: look into more effecient use of time for stabilizer and fixer than sleeping? what does the mechanism in utils.repeat do?
+        # Start stabilizing periodically
         self.stabilizer_timeout = stabilizer_timeout
-        threading.Thread(target=self.stabilizer, daemon=True).start() # Start stabilizing periodically
+        threading.Thread(target=self.stabilizer, daemon=True).start()
+        # Start fixing fingers periodically
         self.fixer_timeout = fixer_timeout
-        threading.Thread(target=self.fixer, daemon=True).start() # Start fixing fingers periodically
+        threading.Thread(target=self.fixer, daemon=True).start() 
 
-    def join(self):
+    def finger_start(self, fgr_idx):
+        return (self.nodeid + 2 ** fgr_idx) % (2 ** self.system_bitwidth)
+
+    def join(self, blacklist=set()):
+        # TODO: copy succ's finger table when joining for some baseline approximations?
+        #   - will have to be careful in degenerate (first node) case that there will be no FT to copy
         if self.verbose: print(f"Attempting to join cluster {self.cluster_name}...")
 
-        # Find an existing node in cluster via catalog.
+        # Attempt to locate nonself node in same cluster from catalog.
         # Make a random choice to hopefully distribute the load of bootstrapping joining nodes.
-        try:
-            liaison = RPCClient(lambda peers: random.choice([node for node in peers if self.cluster_name in node.get('project', '') and 'chordclient' in node.get('project', '') and not str(self.nodeid) in node.get('project', '')]))
-            self.fingers[0] = Node(*liaison.lookup(self.nodeid + 1), **self.cxn_kwargs) # fix successor
-            if self.verbose: print(f"Successfully joined cluster with {self.fingers[0].nodeid} as successor via liason {liason.addr[0]}:{liason.addr[1]}...")
-            # NOTE: pred stays None: perioidic stabilizes will fix this later
-        except IndexError: # could not choose from peers because node is first member of chord cluster
-            # NOTE: Node creates a socket: is it fine to have the same process at both ends of a socket?
-            # https://stackoverflow.com/a/8118180 suggests YES, fine
-            # Not sure we get any actual benefit from this besides uniform handling of degenerate case
+        # If none exist, we are the first node in the cluster.
+        try: 
+            def choose(peers):
+                suitable = [node for node in peers if self.cluster_name in node.get('project', '') and 'chordclient' in node.get('project', '') and not f'{self.nodeid}:{self.port}' in node.get('project', '') and node.get('project', '') not in blacklist]
+                if self.verbose: print(f"Found {len(suitable)} suitable peers: {suitable}")
+                choice = random.choice(suitable)
+                if self.verbose: print(f"Chose {choice}")
+                return choice
+            liaison = RPCClient(choose)
+            # Ask liaison to lookup our successor (so we can stabilize to that successor and thus gradually join)
+            self.fingers[0] = Node(*liaison.lookup(self.nodeid + 1), **self.cxn_kwargs)
+            # TODO: fix this \ in final go around
+            if self.verbose: print(f"Successfully joined cluster with {self.fingers[0].nodeid} \
+                    as successor via liaison {liaison.addr[0]}:{liaison.addr[1]}...")
+            # Note that pred stays None: stabilizes will fix this later.
+            # Once we have integrated as succ's pred, then succ's former pred will contact us with suspected_pred
+        except IndexError: # could not choose from empty peerlist: node is first member of chord cluster
+            # The use of a Node/RPCClient to ourselves allows uniform handling of degenerate case
+            #  - https://stackoverflow.com/a/8118180 suggests it is fine to have same process at both ends of a socket
             if self.verbose: print("First node in cluster, setting self as succ...")
             self.fingers[0] = Node(self.nodeid, (self.myip, self.port), **self.cxn_kwargs)
-        except ConnectionError:
+        except ConnectionError: # found liaison in catalog but couldn't connect
             if self.verbose: print(f"Couldn't connect to liaison, retrying...")
-            self.join()
+            self.join(blacklist | {liaison.name})
 
     # Iterative lookup: return next node to talk to (if that person is me -- same node twice in a row, HTC will get the value from me)
     #   - just return from cpf
     # Recursive lookup:
     #   - benefit: sockets already open
     def lookup(self, hashed_key):
-        # TODO: re-examine whole lookup process to be sure that it works and can tolerate one bad finger via last_node
         if self.verbose: print(f"Looking up {hashed_key}...")
         #hashed_key = self.hash(key.encode('utf-8')) % (2 ** self.system_bitwidth)
         try:
             last_node = node = Node(self.nodeid, (self.myip, self.port), **self.cxn_kwargs)
+         # Shouldn't ever happen that we are asked to perform a lookup before our server is running,
+         # bc the server is how we receive requests.
+         # Note also that our constructor blocks until server is running before starting other threads,
+         # so no chance we could ask ourselves to lookup before server running.
         except AttributeError:
             if self.verbose: print("Tried lookup before server running, sleeping and will try again...")
             time.sleep(self.lookup_timeout)
             return self.lookup(hashed_key)
  
         while last_node and node.nodeid != last_node.nodeid:
-            prev_nodeid = node.nodeid
             try:
                 nxt_nodeid, nxt_nodeaddr = node.closest_preceding_finger(hashed_key) # return nodeid instead to find connection
             except ConnectionError:
                 if self.verbose: print(f"Node down: trying last node ({prev_nodeid})...")
                 # Node down...find cpf(cpf(node)) and so on
-                nxt_node = last_node.closest_preceding_finger(node.nodeid-1)
-                # If successor is down wait for next stabilize() and retry
-                if node.nodeid == prev_nodeid:
+                nxt_nodeid, nxt_nodeaddr = last_node.closest_preceding_finger(node.nodeid-1)
+                # If the node is last_node.cfp(node-1), that means last_node is trying to redirect us to its successor
+                # (look at special case for successor in cfp)
+                # If successor is down wait for a while (for stabilize()/poke() to straighten things out) and retry
+                if nxt_nodeid == node.nodeid:
                     if self.verbose: print(f"Previous node's successor is down: waiting so we can stabilize and succeed soon...")
                     # Failed lookup; retry 
                     time.sleep(self.lookup_timeout)
@@ -153,26 +166,37 @@ class ChordClient:
 
             last_node = node
             node = Node(nxt_nodeid, nxt_nodeaddr, **self.cxn_kwargs)
-            #node = RPCClient(utils.project_eq(self.cluster_name + str(nodeid) + 'chordclient'))
         return node.nodeid, node.addr
 
     def closest_preceding_finger(self, key):
         if self.verbose: print(f"Finding closest preceding finger of {key}...")
         # Logic (see p.249 in textbook)
         try:
-            if self.inrange(key, self.pred, self.nodeid+1) or self.pred == self.nodeid:
+            if self.inrange(key, self.pred.nodeid, self.nodeid+1) or self.pred.nodeid == self.nodeid:
+                # In our range: we are responsible.
+                # Note that returning ourselves here, and succ when succ is responsible in next case,
+                # contracts the name "closest preceding finger", since actually the node returned in these
+                # cases (ourself or succ) SUCCeeds the key.
+                # However, the important part here is that we know we are not skipping over the node responsible,
+                # as may happen if one returns the succeeding finger.
+                # Indeed, lookup will ask us or succ to find key, they will themselves, and then search will stop.
                 if self.verbose: print(f"I am responsible for that key ({key})...")
-                while self.port is None: # in case server has not yet started
-                    time.sleep(self.lookup_timeout)
-                return self.nodeid, (self.myip, self.port) # we are responsible
+                # TODO: remove if we don't encounter problems without it.
+                # Wait until server has started.
+                # Shouldn't actually happen since we wait for server to start before starting other threads
+                #while self.port is None: 
+                #    time.sleep(self.lookup_timeout)
+                return self.nodeid, (self.myip, self.port) 
         except TypeError:
             if self.verbose: print(f"predecessor is None, sleeping so we can stabilize and have a predecessor soon...")
+            # TODO: something more efficient than sleeping?
             time.sleep(self.lookup_timeout)
             return self.closest_preceding_finger(key)
 
         if self.inrange(key, self.nodeid, self.fingers[0].nodeid+1):
+            # In successor's range: return successor. See note in above case.
             if self.verbose: print(f"My successor is responsible for that key ({key})...")
-            return self.fingers[0].nodeid, self.fingers[0].addr # successor is responsible
+            return self.fingers[0].nodeid, self.fingers[0].addr
 
         # Find cpf to talk to for more accurate info
         for i in range(self.system_bitwidth):
@@ -181,6 +205,7 @@ class ChordClient:
                     if self.verbose: print(f"I am recommending you talk to {self.fingers[i].nodeid} for more information...")
                     return self.fingers[i].nodeid, self.fingers[i].addr
             except TypeError: # occurs when next finger has not yet been determined (is None)
+                # go ahead and stop the search here. TODO: thoughts on trying to find the next non-None finger?
                 return self.fingers[i].nodeid, self.fingers[i].addr
 
     def leave(self):
@@ -191,6 +216,7 @@ class ChordClient:
         if self.verbose: print("[Poker] Starting poker...")
         while not self.leaving:
             self.fix_finger()
+            # TODO: something more efficient than sleeping?
             time.sleep(self.fixer_timeout)
 
     def fix_finger(self):
@@ -198,16 +224,21 @@ class ChordClient:
         if self.verbose: print(f"[Poker] Fixing finger {fgr_idx}")
         corr_fgr, corr_addr = self.lookup(self.finger_start(fgr_idx))
         if self.fingers[fgr_idx] is None or corr_fgr != self.fingers[fgr_idx].nodeid:
-            if self.verbose: print(f"[Poker] Set finger {fgr_idx} from {self.fingers[fgr_idx].nodeid if self.fingers[fgr_idx] else None} to {corr_fgr}...")
+            if self.verbose: print(f"[Poker] Set finger {fgr_idx}: {self.fingers[fgr_idx].nodeid if self.fingers[fgr_idx] else None} --> {corr_fgr}...")
             self.fingers[fgr_idx] = Node(corr_fgr, corr_addr, **self.cxn_kwargs)
-            # correct as many fingers as able at the current time
+            # Slight optimization: correct as many fingers as able at the current time.
+            # If fgr i's (closest) succ succeeds fgr i+1's start, then it is also fgr i+1's (closest) succ,
+            # so we can go ahead and adjust fgr i+1 also.
+            # Continue down the line as long as we are making useful adjustments.
+            # Note that this is an optimization because we can fix several fingers with only the original lookup call.
+            # However, stop chain if fgr i+1 already has correct finger: we can get no more use of succ(fgr i) in this case.
+            # If fgr i+1 has correct finger, then if this succ(fgr i) also succeeds fgr i+2,
+            # it will have already been updated by this same process, when fgr i+1 last updated its successor.
+
             i = 1
             n = self.system_bitwidth
-            #while self.inrange(self.fingers[(fgr_idx+i)%n].start, self.fingers[fgr_idx].start, corr_fgr):
-            # if my succ succeeds next guy's start, then it is also next guy's succ
-            # however, stop chain if next guy already has correct finger
-            # if next guy has correct finger, then if this finger applies to next next guy, it will have already been updated by this same process when next guy updated his
-            # note that we use self.nodeid+1 as the (exclusive) end bound because the furthest clkwise any finger can be is ourself
+            # Note that we use self.nodeid+1 as the (exclusive) end bound,
+            # because the furthest clkwise any finger can point is ourself (otherwise, ourself is a closer successor).
             check_idx = (fgr_idx + i) % n
             check_fgr = self.fingers[check_idx]
             while self.inrange(self.finger_start(check_idx), self.nodeid+1, corr_fgr) and (check_fgr is None or check_fgr.nodeid != corr_fgr):
@@ -222,53 +253,73 @@ class ChordClient:
         if self.verbose: print("[Stabilizer] Starting stabilizer...")
         while not self.leaving:
             self.stabilize()
+            # TODO: something more efficient than sleeping?
             time.sleep(self.stabilizer_timeout)
 
     def pop_succ(self):
-        print("Removing lost successor")
-        try:
-            del(self.succclients[self.succlist[0].nodeid])
-            self.succlist = self.succlist[1:]
-            # TODO: is it potentially dangerous to share Node objects here?
-            self.fingers[0] = self.succlist[0] # use already open connection to populate finger table
-        except IndexError: # if we've lost all of succlist, attempt to find succ via join
+        # Next man up in succlist is taken as new succ
+        self.succlist = self.succlist[1:] + [None]
+        self.fingers[0] = self.succlist[0]
+        #print(self.fingers)
+        #print(self.succlist)
+        #import sys
+        #sys.exit()
+        if self.fingers[0] is None:
+            # TODO: think harder about implications heree and if anything can go wrong,
+            # since join is originally called without possibility of server/stabilize/finger interrupting
+            #  - server bc we are not yet part of circle or registered with catalog, so no one can find us
             if self.verbose: print("Lost all successors, rejoining system...")
             self.join()
-
+        return
 
     def stabilize(self):
         if self.verbose: print("[Stabilizer] Stabilizing...")
+
+        # Maintain succ and sync their pred
         try:
-            succ_pred_id, succ_pred_addr = self.fingers[0].rpc.predecessor()
-            if succ_pred_id is not None and self.inrange(succ_pred_id, self.nodeid, self.fingers[0].nodeid):
-                if self.verbose: print(f"[Stabilizer] Found that {succ_pred_id} is a better successor than {self.fingers[0].nodeid}...")
-                self.fingers[0] = Node(succ_pred_id, succ_pred_addr, **self.cxn_kwargs)
-            while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
+            succ_pred = self.fingers[0].rpc.predecessor()
+            if succ_pred is not None and self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid):
+                if self.verbose: print(f"[Stabilizer] Found that {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
+                self.fingers[0] = Node(*succ_pred, **self.cxn_kwargs)
+            # TODO: remove if no problems arise: should be fine here bc we delay stabilizing until port is known
+            #while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
             self.fingers[0].rpc.suspected_predecessor(self.nodeid, (self.myip, self.port))
         except ConnectionError:
+            # Retry with new succ
             if self.verbose: print("[Stabilizer] Lost successor...")
             self.pop_succ()
-            return self.stabilize() # retry stabilization
+            return self.stabilize()
 
-        # Also maintain succlist
-        # naive: reconstruct whole succlist
-        # better (not my idea): copy succ's succlist
-        succ_succlist = self.fingers[0].rpc.successor_list()
-        # Only chop off end if spilling over: faciliates build up of succlist in small cluster cases
-        truncated_succ_succlist_tuples = succ_succlist[:min(len(succ_succlist), self.succlistlen-1)]
+        # Maintain succlist: copy succ's, then add them to front
+        try:
+            succ_succlist_tuples = self.fingers[0].rpc.successor_list()
+        except ConnectionError:
+            # Retry with new succ
+            if self.verbose: print("[Stabilizer] Lost successor...")
+            self.pop_succ()
+            return self.stabilize()
 
-        new_succlist_tuples = [(self.fingers[0].nodeid, self.fingers[0].addr)] + truncated_succ_succlist_tuples
-        print(succ_succlist, new_succlist_tuples)
-        new_succclients = {
-            nodeid: self.succclients.get(nodeid, Node(nodeid, nodeaddr, **self.cxn_kwargs))
-            for nodeid, nodeaddr in new_succlist_tuples
+        #   with static length, succ_succlist will be always full (and so should always chop off last entry)
+        new_succlist_tuples = [(self.fingers[0].nodeid, self.fingers[0].addr)] + succ_succlist_tuples[:-1] 
+
+        # Create temporary succclients LUT so we don't have to recreate Node/RPCClients we already have
+        succclients = {
+            node.nodeid: node
+            for node in [succ for succ in self.succlist if succ is not None]
         }
+
         new_succlist = [
-            new_succclients[nodeid]
-            for nodeid, nodeaddr in new_succlist_tuples
+            # succ tuples of form: [id, addr] | None
+            succclients.get(succ[0], Node(succ[0], succ[1], **self.cxn_kwargs))
+            if succ is not None else
+            None
+            for succ in new_succlist_tuples
         ]
-        # maintain succclients LUT so we don't have to recreate RPCs/sockets for connections we already have
-        if self.verbose: print(f"[Stabilizer] Change succlist {[succ.nodeid for succ in self.succlist]} --> {[t[0] for t in new_succlist_tuples]}...")
+        if self.verbose: print(f"[Stabilizer] Changing succlist {self.succlist} --> {new_succlist}...")
+
+        # TODO: was this actually necessary?
+        # If the stabilizer thread performs the upcall, then sleeps, then runs stabilize again, how can it interrupt the upcall?
+        #   - neat concept and thought experiment, but if stabilize instances interrupt each other we'll have much bigger problems
         # Update in-place so that current iterator references to the list reflect the updates made,
         # if stabilize preempts the thread and changes the succlist.
         # Also important is that we perform the update before upcalling to HashArmonica to ensure
@@ -276,49 +327,58 @@ class ChordClient:
         # to drop their associated replicas.
         # First, make a copy of the old_succlist
         old_succlist = self.succlist.copy()
-        for i, new_succ in enumerate(new_succlist):
-            if i >= len(self.succlist):
-                self.succlist.append(new_succ)
-            else:
-                self.succlist[i] = new_succ
-        # lose references to obsolete rpcs, closing sockets
-        self.succclients = new_succclients
-        
+        for i, new_succ in enumerate(new_succlist): # (static length succlist)
+            # this loses references to obsolete rpcs, closing sockets via __del__
+            self.succlist[i] = new_succ
         self.callback_fxn(old_succlist, new_succlist)
 
-
     def suspected_predecessor(self, src_id, src_addr):
-        # ping pred to ensure alive
+        # TODO: make sure to handle case that pred is wrong, so lookup returns self when it shouldn't have
+        #  - already done by TryAgainError?
+
+        # Ping pred to ensure alive
+        # Moved to predecessor fxn so that pred will get set to None in stabilize, and then suspected_pred can change on next invocation
+        """
         try:
             if self.verbose: print(f"[Server] Pinging pred {self.pred.nodeid}...")
             self.pred.rpc.ping()
             if self.verbose: print(f"[Server] Successfully contacted pred {self.pred.nodeid}")
-        except ConnectionError:
+        except ConnectionError: # If not, we'll accept this pred (better than nothing)
             if self.verbose: print(f"[Server] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
             self.pred = None
         except AttributeError: # self.pred is None
             pass
+        """
 
         if self.pred is None or self.pred.nodeid == self.nodeid or self.inrange(src_id, self.pred.nodeid, self.nodeid):
             if self.verbose: print(f"[Server] Contacted by better predecessor ({self.pred.nodeid if self.pred else 'None'} --> {src_id})...")
             self.pred = Node(src_id, src_addr, **self.cxn_kwargs)
 
-    def predecessor(self): return (self.pred.nodeid, self.pred.addr) if self.pred is not None else (None, None)
+    def predecessor(self):
+        # We ping our predecessor here to ensure we don't give back bad info
+        # Normally, not a big deal to tell someone to switch their succ to someone dead
+        # However, in 2-node case, this causes the live node to think dead pred is a better succ,
+        # then find out succ is dead, then set succ back to self (next in line), then re-stabilize and 
+        # Possible alternative: just finish the current instance of stabilize with new succ and 
+        try:
+            self.pred.rpc.ping()
+            return (self.pred.nodeid, self.pred.addr)
+            if self.verbose: print(f"[Server] Pang pred {self.pred.nodeid}")
+        except ConnectionError:
+            if self.verbose: print(f"[Server] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
+            self.pred = None
+        except AttributeError: pass # attribute error if pred is none, so no rpc/nodeid attr
+        
+        return None
 
     def successor(self): return self.fingers[0].nodeid, self.fingers[0].addr
 
-    def successor_list(self): return [[succ.nodeid, succ.addr] for succ in self.succlist]
+    def successor_list(self): return [[succ.nodeid, succ.addr] if succ else None for succ in self.succlist]
 
     def ping(self): pass
 
     # SERVER THREAD FUNCTIONS: Handle communication from other nodes
-
-    # Big Q: how to balance time spent listening vs computing
-    # Another big Q: do we need to ensure only one stablize/fix_finger check in-flight at a time?
-    #   - certainly wasteful to have multiple going, but each should return the same result
-    #   - if returning different results, next iteration will revert back to correct, guaranteed
-    #   - eventual consistency?
-    # Both of these resolved via threads
+    # TODO: switch over to utils' version?
     def server(self):
         # TODO: return fake error if self.leaving
         # open listening socket
@@ -330,8 +390,6 @@ class ChordClient:
         new_cxns.listen()
         self.port = new_cxns.getsockname()[1]
         if self.verbose: print(f'[Server] Listening on port {self.port}...')
-        self.catalog.register('chord', self.cluster_name + str(self.nodeid) + 'chordclient', self.port, 'tfisher4') # Spawns registration thread
-        if self.verbose: print(f'[Server] Registered as {self.cluster_name+str(self.nodeid)}chordclient to catalog service...')
         while True: # Poll forever
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
             for rd_skt in readable:
@@ -386,8 +444,6 @@ class ChordClient:
             'status': 'success',
             'result': result
         }
-
-
 
 class BadRequestError(RuntimeError):
     ''' An internal exception used to distinguish exceptions expected due to bad requests. '''
