@@ -3,6 +3,8 @@ import json
 import sys
 import select
 
+class TryAgainError(Exception): pass
+
 ''' HashArmonicaNetworkUtils provides common, opinionated networking utilities that both the client and server RPC stubs utilize.
     Here, we encapsulate our networking protocol, by which we mean how a message should be formatted over a TCP stream, and not the exact format of the message.
     We define a message to be a Python JSON parsable object.
@@ -269,12 +271,13 @@ class Server():
         new_cxns.bind((socket.gethostname(), 0))
         new_cxns.listen()
         program.port = new_cxns.getsockname()[1]
-        if program.verbose: print(f'Listening on port {self.port}...')
+        if program.verbose: print(f'Listening on port {program.port}...')
         try:
-            program.catalog.register('chord', program.cluster_name + str(program.nodeid) + proj_suffix, program.port, 'tfisher4') # Spawns registration thread
+            name = program.cluster_name + str(program.nodeid) + proj_suffix
+            program.catalog.register('chord', name, program.port, 'tfisher4') # Spawns registration thread
+            if program.verbose: print(f'Registered as {name} to catalog service...')
         except AttributeError:
             pass
-        if program.verbose: print(f'Registered as {self.cluster_name+str(self.nodeid)} to catalog service...')
         while True: # Poll forever
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
             for rd_skt in readable:
@@ -329,3 +332,13 @@ class Server():
             'status': 'success',
             'result': result
         }
+
+class BadRequestError(RuntimeError):
+    ''' An internal exception used to distinguish exceptions expected due to bad re
+quests. '''
+    def __init__(self, cause):
+        super().__init__()
+        self.cause = cause
+
+    def __str__(self):
+        return str(self.cause)
