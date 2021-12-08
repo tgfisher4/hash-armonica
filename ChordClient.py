@@ -486,7 +486,7 @@ class ChordClient:
             if succ_pred is not None and (self.fingers[0].nodeid == self.nodeid or self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid)):
                 if self.verbose: print(f"[{utils.now()}][Stabilizer] Found that succ.pred {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
                 self.fingers[0] = Node(*succ_pred, **self.cxn_kwargs)
-                self.succlist = self.fingers[0] + self.succlist[:-1]
+                self.succlist = [self.fingers[0]] + self.succlist[:-1]
             # TODO: remove if no problems arise: should be fine here bc we delay stabilizing until port is known
             #while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
             self.fingers[0].rpc.suspected_predecessor(self.nodeid, (self.myip, self.port))
