@@ -455,21 +455,38 @@ class ChordClient:
             # TODO: think harder about implications heree and if anything can go wrong,
             # since join is originally called without possibility of server/stabilize/finger interrupting
             #  - server bc we are not yet part of circle or registered with catalog, so no one can find us
-            if self.verbose: print(f"[{utils.now()}][Stabilizer][REJOIN|BAD] Lost all successors, rejoining system...")
-            self.setup()
+            #if self.verbose: print(f"[{utils.now()}][Stabilizer][REJOIN|BAD] Lost all successors, rejoining system...")
+            #self.setup()
             if self.verbose: print("Our succlist has been completely depleted. We cannot guarantee all data has been retained. Preparing to self-destruct.")
             self.self_destruct = True
         return
 
     def stabilize(self):
+        # Predecessor health check.
+        # Why health check?
+        #  If pred goes down, need to notice somewhere, or else we will never accept another "worse" pred.
+        # Why here?
+        #  If done by the server, run the risk of deadlock since this means our server blocks to make an RPC: cannot serve requests in the meantime.
+        #  If the server we are trying to reach does the same back to us, we can deadlock since neither server is actively serving requests, but waiting for service from the other.
         if self.verbose: print(f"[{utils.now()}][Stabilizer] Stabilizing...")
+        try:
+            self.pred.rpc.ping()
+            if self.verbose: print(f"[{utils.now()}][Stabilizer] Pang pred {self.pred.nodeid}")
+            #print(f"[Server] Pang pred {self.pred.nodeid}")
+            #return (self.pred.nodeid, self.pred.addr)
+        except ConnectionError:
+            if self.verbose: print(f"[{utils.now()}][Stabilizer] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
+            #print(f"[Server] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
+            self.pred = None
+        except AttributeError: pass # if pred is none, no health to check
 
         # Maintain succ and sync their pred
         try:
             succ_pred = self.fingers[0].rpc.predecessor()
-            if succ_pred is not None and self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid):
+            if succ_pred is not None and (self.fingers[0].nodeid == self.nodeid or self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid)):
                 if self.verbose: print(f"[{utils.now()}][Stabilizer] Found that succ.pred {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
                 self.fingers[0] = Node(*succ_pred, **self.cxn_kwargs)
+                self.succlist = self.fingers[0] + self.succlist[:-1]
             # TODO: remove if no problems arise: should be fine here bc we delay stabilizing until port is known
             #while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
             self.fingers[0].rpc.suspected_predecessor(self.nodeid, (self.myip, self.port))
@@ -477,7 +494,8 @@ class ChordClient:
             # Retry with new succ
             if self.verbose: print(f"[{utils.now()}][Stabilizer] Lost successor (when asking for pred/reporting self as pred)...")
             self.pop_succ()
-            return self.stabilize()
+            if self.verbose: print(f"Giving up on this stabilize run, hopefully next will be better...")
+            return #self.stabilize()
 
         # Maintain succlist: copy succ's, then add them to front
         # Handle this case separately because everything else assumes
@@ -568,17 +586,8 @@ class ChordClient:
         # However, in 2-node case, this causes the live node to think dead pred is a better succ,
         # then find out succ is dead, then set succ back to self (next in line), then re-stabilize and 
         # Possible alternative: just finish the current instance of stabilize with new succ and 
-        if self.pred and self.pred.nodeid == self.nodeid: return (self.pred.nodeid, self.pred.addr)
-        try:
-            self.pred.rpc.ping()
-            if self.verbose: print(f"[{utils.now()}][Server] Pang pred {self.pred.nodeid}")
-            #print(f"[Server] Pang pred {self.pred.nodeid}")
-            return (self.pred.nodeid, self.pred.addr)
-        except ConnectionError:
-            if self.verbose: print(f"[{utils.now()}][Server] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
-            #print(f"[Server] Unable to contact pred {self.pred.nodeid} ({self.pred.nodeid} --> None)")
-            self.pred = None
-        except AttributeError: pass # attribute error if pred is none, so no rpc/nodeid attr
+        #if self.pred and self.pred.nodeid == self.nodeid:
+        return (self.pred.nodeid, self.pred.addr)
         
         return None
 
