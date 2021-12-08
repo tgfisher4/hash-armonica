@@ -50,7 +50,7 @@ class HashArmonica:
         # TODO: ChordClient returns nodeid, successor
         # succ is a tuple with ?
         self.nodeid = self.chord.nodeid
-        print(f"I am {self.nodeid}")
+        if self.verbose: print(f"I am {self.nodeid}")
 
         
         # TODO: Query successor with our nodeid to obtain the data that we now own
@@ -71,7 +71,7 @@ class HashArmonica:
             #   keys to push to us. stabilizes will resolve
             except (AttributeError, ConnectionError, utils.TryAgainError):
                 time.sleep(self.wait_for_stable_timeout)
-        print("INIT DATA: " + str(init_data))
+        if self.verbose: print("INIT DATA: " + str(init_data))
         self.mass_raw_insert(init_data['data']) # gonna need to send something to signify joining
 
         wrapped = False
@@ -124,7 +124,7 @@ class HashArmonica:
     def store(self, hashed_key, value):
         # TODO: catch TryAgainError?
         if not hashed_key in self.chord:
-            print(f"Was told to store {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
+            if self.verbose: print(f"Was told to store {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
             raise utils.TryAgainError
         self.raw_insert(hashed_key, value)
 
@@ -140,8 +140,8 @@ class HashArmonica:
             try: replica.rpc.raw_insert(hashed_key, value)
             # replica down: we'll discover on next stabilize
             except ConnectionError: pass
-        print(f"Stored and replicated {hashed_key}->{value}. My new table:")
-        print(self.table)
+        if self.verbose: print(f"Stored and replicated {hashed_key}->{value}. My new table:")
+        if self.verbose: print(self.table)
 
     def raw_insert(self, key, value):
         self.table[key] = value
@@ -149,7 +149,7 @@ class HashArmonica:
     def remove(self, hashed_key):
         # TODO: catch TryAgainError?
         if not hashed_key in self.chord:
-            print(f"Was told to remove {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
+            if self.verbose: print(f"Was told to remove {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
             raise utils.TryAgainError
         to_return = self.raw_delete(hashed_key)
         for replica in self.replicas:
@@ -159,7 +159,7 @@ class HashArmonica:
             # Replica down or key missing --> key already dropped
             except (ConnectionError, KeyError): pass    
                 
-        print(f"Removed and unreplicated {hashed_key}->{to_return}. My new table:")
+        if self.verbose: print(f"Removed and unreplicated {hashed_key}->{to_return}. My new table:")
         return to_return
 
     def raw_delete(self, key):
@@ -172,7 +172,7 @@ class HashArmonica:
         return self.table[hashed_key]
 
     def drop(self, rg):
-        print(f"Dropping keys in the range {rg}")
+        if self.verbose: print(f"Dropping keys in the range {rg}")
         for key in self.keys_in_range(*rg):
             self.raw_delete(key)
         """
@@ -196,20 +196,20 @@ class HashArmonica:
         # which seems to mesh better with our general strategy anyway. Doing it!
         try: pred_id = self.chord.pred.nodeid
         except AttributeError: raise utils.TryAgainError
-        data_tuples = [[k, self.table[k]] for k in self.keys_in_range(pred_id+1, joiner)]
+        data_tuples = [[k, self.table[k]] for k in self.keys_in_range(self.chord.mod(pred_id+1), joiner)]
         replica_tuples = [[replica.nodeid, replica.addr] if replica else None for replica in self.replicas]
-        print(f"Pushing {data_tuples} to {joiner} with {replica_tuples}")
+        if self.verbose: print(f"Pushing {data_tuples} to {joiner} with {replica_tuples}")
         return {
             'data': data_tuples,
             'replicas': replica_tuples
         }
 
     def mass_raw_insert(self, k_v_pairs):
-        print(f"Asked to mass_insert: {k_v_pairs}")
+        if self.verbose: print(f"Asked to mass_insert: {k_v_pairs}")
         for k, v in k_v_pairs:
             self.raw_insert(k, v)
-        print("Table after mass-insert:")
-        print(self.table)
+        if self.verbose: print("Table after mass-insert:")
+        if self.verbose: print(self.table)
 
 
     ''' INTERNAL UTILITIES '''
@@ -220,8 +220,8 @@ class HashArmonica:
         while True:
             try:
                 owner_id, owner_addr = self.chord.lookup(hashed_key)
-                print(f"[HAClient] {hashed_key} belongs to {owner_id}")
-                print(f"[HAClient] Ring: {self.chord.succlist}")
+                if self.verbose: print(f"[HAClient] {hashed_key} belongs to {owner_id}")
+                if self.verbose: print(f"[HAClient] Ring: {self.chord.succlist}")
                 node = Node(
                     owner_id,
                     Node(owner_id, owner_addr, **self.chord.cxn_kwargs).rpc.redirect(),
@@ -229,7 +229,7 @@ class HashArmonica:
                 )
                 return fxn(node, hashed_key, *args)
             except (utils.TryAgainError, ConnectionError) as e:#, AttributeError) as e: # AttributeError in case pred.nodeid fails bc pred is None
-                print(f"[HAClient] Operation failed: waiting for stabilize and retrying ({str(e)})...")
+                if self.verbose: print(f"[HAClient] Operation failed: waiting for stabilize and retrying ({str(e)})...")
                 #print(str(e))
                 time.sleep(self.wait_for_stable_timeout)
 
@@ -238,19 +238,19 @@ class HashArmonica:
     ''' 
 
     def keys_in_range(self, start, end):
-        print(self)
+        if self.verbose: print(self)
         if start <= end:
             res = list(self.table.irange(start, end))
         else:
             res = list(self.table.irange(end, None)) + list(self.table.irange(None, start))
-        print(f"k-v pairs found in range [{start}, {end}]: {res}")
+        if self.verbose: print(f"k-v pairs found in range [{start}, {end}]: {res}")
         return res
 
     def my_keys(self): 
         try:
             pred_id = self.chord.pred.nodeid
         except AttributeError: raise TryAgainError
-        return self.keys_in_range(pred_id+1, self.nodeid)
+        return self.keys_in_range(self.chord.mod(pred_id+1), self.nodeid)
     
     ''' UPCALL FUNCTIONS '''
 
@@ -314,14 +314,14 @@ class HashArmonica:
         # Note: create new RPCClient.scket for each rpc here bc the ones in new/old_replicas_dict could be in use by the server
         for newbie in new_replicas_set - old_replicas_set:
             #if self.verbose: print(f"[Stabilizer] Copying keys to {newbie}...")
-            print(f"[Stabilizer] Copying {k_v_pairs} to {newbie}...")
+            if self.verbose: print(f"[Stabilizer] Copying {k_v_pairs} to {newbie}...")
             try: newbie.copy().rpc.mass_raw_insert(k_v_pairs)
             except ConnectionError:
                 if self.verbose: print(f"[Stabilizer] Couldn't copy into replica {newbie}, we'll try again next stabilization...")
                 pass
         for olbie in old_replicas_set - new_replicas_set:
             #if self.verbose: print(f"[Stabilizer] Dropping replicas from {olbie}...")
-            print(f"[Stabilizer] Dropping replica of {k_v_pairs} from {olbie}...")
-            try: olbie.copy().rpc.drop([self.pred.nodeid+1, self.nodeid])
+            if self.verbose: print(f"[Stabilizer] Dropping replica of {k_v_pairs} from {olbie}...")
+            try: olbie.copy().rpc.drop([self.chord.mod(self.pred.nodeid+1), self.nodeid])
             except ConnectionError: pass # When nodes fail, they drop all anyway
             except AttributeError: return # No pred: try again next time

@@ -102,7 +102,7 @@ class ChordClient:
         # However, the inrange check will then be checking the range (me, me+1), which contains nothing.
         # So, we need to consider this case separately.
         try:
-            return self.pred.nodeid == self.nodeid or self.inrange(key, self.pred.nodeid, self.nodeid+1)
+            return self.pred.nodeid == self.nodeid or self.inrange(key, self.pred.nodeid, self.mod(self.nodeid+1))
         except AttributeError:
             return utils.TryAgainError
 
@@ -139,7 +139,7 @@ class ChordClient:
         threading.Thread(target=self.server, daemon=True).start()
         # Determine nodeid: allow multiple nodes on same machine by including port in address to be hashed
         while not self.port: time.sleep(1)
-        self.nodeid = force_nodeid or self.hash(f'{self.myip}:{self.port}'.encode('utf-8')) % (2 ** self.system_bitwidth)
+        self.nodeid = self.hash(f'{self.myip}:{self.port}'.encode('utf-8')) % (2 ** self.system_bitwidth) if force_nodeid is None else force_nodeid
         # Setup
         self.setup() 
         # Start fixing fingers periodically
@@ -171,7 +171,9 @@ class ChordClient:
         threading.Thread(target=self.stabilizer, daemon=True).start()
 
     def finger_start(self, fgr_idx):
-        return (self.nodeid + 2 ** fgr_idx) % (2 ** self.system_bitwidth)
+        return self.mod(self.nodeid + 2 ** fgr_idx)
+
+    def mod(self, n): return n % (2 ** self.system_bitwidth)
 
     def setup(self, blacklist=set()):
         # TODO: copy succ's finger table when setting up for some baseline approximations?
@@ -208,20 +210,23 @@ class ChordClient:
                     #self.fingers[0] = Node(*liaison.lookup(self.nodeid + 1), **self.cxn_kwargs)
                     #self.pred = Node(self.nodeid+1, (self.myip, self.port), **self.cxn_kwargs)
                     # Node with addr None will raise CxnErr when rpc attempted
-                    self.pred = Node(self.nodeid+1, (None, None), **self.cxn_kwargs)
+                    self.pred = Node(self.mod(self.nodeid+1), (None, None), **self.cxn_kwargs)
+                    print(f"[Setup] Setting succ to liaison: {self.fingers[0]} --> {liaison_info['address']}:{liaison_info['port']}")
                     self.fingers[0] = Node(0, (liaison_info['address'], liaison_info['port']), **self.cxn_kwargs)
+                    # Ping here so we don't panic if we can't connect to liaison in lookup
                     self.fingers[0].rpc.ping()
-                    self.fingers[0] = Node(*self.lookup(self.nodeid + 1), **self.cxn_kwargs)
+                    self.fingers[0] = Node(*self.lookup(self.mod(self.nodeid+1)), **self.cxn_kwargs)
+                    print(f"[Setup] Looked up succ and now changing {liaison_info['address']}:{liaison_info['port']} --> {self.fingers[0].nodeid}")
                     # Note that 'rest' means that i starts at 1:
                     # we do not allow our own successor to be overriden.
                     for i, fgr in utils.rest(enumerate(self.fingers[0].rpc.finger_table())):
                         self.fingers[i] = fgr and Node(*fgr, **self.cxn_kwargs)
-                    print("Finished setting up!")
-                    print(self)
+                    if self.verbose: print("Finished setting up!")
+                    if self.verbose: print(self)
 
                     break
                 except utils.TryAgainError:
-                    print(f"[{utils.now()}][Setup] Liaison reported ring inconsistency, waiting and trying again...")
+                    if self.verbose: print(f"[{utils.now()}][Setup] Liaison reported ring inconsistency, waiting and trying again...")
                     time.sleep(self.lookup_timeout)
             # TODO: fix this \ in final go around
             if self.verbose: print(f"[{utils.now()}][Setup] Successfully set up self on Chord level to join cluster with {self.fingers[0].nodeid} \
@@ -232,7 +237,7 @@ class ChordClient:
         except IndexError: # could not choose from empty peerlist: node is first member of chord cluster
             # The use of a Node/RPCClient to ourselves allows uniform handling of degenerate case
             #  - https://stackoverflow.com/a/8118180 suggests it is fine to have same process at both ends of a socket
-            if self.verbose: print(f"[{utils.now()}][Setup] First node in cluster, setting self as succ...")
+            print(f"[{utils.now()}][Setup] First node in cluster, setting self as succ and pred...")
             self.fingers[0] = Node(self.nodeid, (self.myip, self.port), **self.cxn_kwargs)
             self.pred = self.fingers[0].copy()
         except ConnectionError: # found liaison in catalog but couldn't connect
@@ -244,8 +249,8 @@ class ChordClient:
     # Recursive lookup:
     #   - benefit: sockets already open
     def lookup(self, hashed_key):
-        #if self.verbose: print(f"Looking up {hashed_key}...")
-        print(f"[{utils.now()}][CClient] Looking up {hashed_key}...")
+        if self.verbose: print(f"Looking up {hashed_key}...")
+        #print(f"[{utils.now()}][CClient] Looking up {hashed_key}...")
         #hashed_key = self.hash(key.encode('utf-8')) % (2 ** self.system_bitwidth)
         try:
             # TODO: a priori this seems fine, but maybe a little worrisome given how flaky it seems self-sockets are
@@ -263,7 +268,7 @@ class ChordClient:
  
         while not last_node or node.nodeid != last_node.nodeid:
             try:
-                print(f"[{utils.now()}][CClient] Trying {node.nodeid}...")
+                if self.verbose: print(f"[{utils.now()}][CClient] Trying {node.nodeid}...")
                 nxt_nodeid, nxt_nodeaddr = node.rpc.closest_preceding_finger(hashed_key) # return nodeid instead to find connection
                 #addr_to_return = node.rpc.redirect()
             except ConnectionError:
@@ -272,16 +277,16 @@ class ChordClient:
                 # so if we were going to exit the while loop we would hit that 'if' first.
                 #if self.verbose: print(f"Node down: trying last node ({prev_nodeid})...")
                 if last_node is None:
-                    print(f"[{utils.now()}][CClient] Node {node.nodeid} down with last_node being None, meaning we cannot contact ourselves :/")
+                    if self.verbose: print(f"[{utils.now()}][CClient] Node {node.nodeid} down with last_node being None, meaning we cannot contact ourselves :/")
                     raise utils.TryAgainError
 
                 # Node down...find cpf(cpf(node)) and so on
                 try:
-                    print(f"[{utils.now()}][CClient] Node down: trying last node ({last_node.nodeid})...")
-                    nxt_nodeid, nxt_nodeaddr = last_node.rpc.closest_preceding_finger(node.nodeid-1)
+                    if self.verbose: print(f"[{utils.now()}][CClient] Node {node.nodeid} down: trying last node ({last_node.nodeid})...")
+                    nxt_nodeid, nxt_nodeaddr = last_node.rpc.closest_preceding_finger(self.mod(node.nodeid-1))
                 except ConnectionError:
                     #if self.verbose: print(f"Previous node is down: waiting so we can stabilize and retrying...")
-                    print(f"[{utils.now()}][CClient] Previous node is down: waiting so we can stabilize and retry...")
+                    if self.verbose: print(f"[{utils.now()}][CClient] Previous node {last_node.nodeid} is down: waiting so we can stabilize and retry...")
                     raise utils.TryAgainError
                     # Failed lookup; retry 
                     #time.sleep(self.lookup_timeout)
@@ -292,7 +297,7 @@ class ChordClient:
                 # If successor is down wait for a while (for stabilize()/poke() to straighten things out) and retry
                 if nxt_nodeid == node.nodeid:
                     #if self.verbose: print(f"Previous node's successor is down: waiting so we can stabilize and retrying...")
-                    print(f"[{utils.now()}][CClient] Previous node's successor is down: waiting so we can stabilize and retrying...")
+                    if self.verbose: print(f"[{utils.now()}][CClient] Previous node's {last_node.nodeid} successor is down: waiting so we can stabilize and retrying...")
                     raise utils.TryAgainError
                     # Failed lookup; retry 
                     #time.sleep(self.lookup_timeout)
@@ -307,14 +312,14 @@ class ChordClient:
 
             last_node = node
             node = Node(nxt_nodeid, nxt_nodeaddr, **self.cxn_kwargs)
-            print(f"[{utils.now()}][CClient] Advancing node to {nxt_nodeid}, last_node to {last_node.nodeid}")
+            if self.verbose: print(f"[{utils.now()}][CClient] Advancing node to {nxt_nodeid}, last_node to {last_node.nodeid}")
         return node.nodeid, node.addr
 
     def closest_preceding_finger(self, key):
         if self.verbose: print(f"[{utils.now()}][CClient] Finding closest preceding finger of {key}...")
         # Logic (see p.249 in textbook)
         try:
-            if self.inrange(key, self.pred.nodeid, self.nodeid+1) or self.pred.nodeid == self.nodeid:
+            if self.inrange(key, self.pred.nodeid, self.mod(self.nodeid+1)) or self.pred.nodeid == self.nodeid:
                 # In our range: we are responsible.
                 # Note that returning ourselves here, and succ when succ is responsible in next case,
                 # contracts the name "closest preceding finger", since actually the node returned in these
@@ -323,7 +328,7 @@ class ChordClient:
                 # as may happen if one returns the succeeding finger.
                 # Indeed, lookup will ask us or succ to find key, they will themselves, and then search will stop.
                 #if self.verbose: print(f"I am responsible for that key ({key})...")
-                print(f"[{utils.now()}][Server] I am responsible for that key ({key})...")
+                if self.verbose: print(f"[{utils.now()}][Server] I am responsible for that key ({key})...")
                 # TODO: remove if we don't encounter problems without it.
                 # Wait until server has started.
                 # Shouldn't actually happen since we wait for server to start before starting other threads
@@ -339,10 +344,10 @@ class ChordClient:
         except AttributeError: raise utils.TryAgainError
 
         try:
-            if self.inrange(key, self.nodeid, self.fingers[0].nodeid+1):
+            if self.inrange(key, self.nodeid, self.mod(self.fingers[0].nodeid+1)):
                 # In successor's range: return successor. See note in above case.
                 #if self.verbose: print(f"My successor is responsible for that key ({key})...")
-                print(f"[{utils.now()}][CServer] My successor is responsible for that key ({key})...")
+                if self.verbose: print(f"[{utils.now()}][CServer] My successor is responsible for that key ({key})...")
                 return self.fingers[0].nodeid, self.fingers[0].addr
         except AttributeError: # No successor: retry, but not at me
             if self.verbose: print(f"[{utils.now()}][CServer] No successor right now, telling original node to try again in a few")
@@ -351,9 +356,9 @@ class ChordClient:
         # Find cpf to talk to for more accurate info
         for i in range(self.system_bitwidth):
             try:
-                if self.inrange(key, self.fingers[i].nodeid-1, self.fingers[(i+1)%self.system_bitwidth].nodeid):
+                if self.inrange(key, self.mod(self.fingers[i].nodeid-1), self.fingers[(i+1)%self.system_bitwidth].nodeid):
                     #if self.verbose: print(f"I am recommending you talk to {self.fingers[i].nodeid} for more information...")
-                    print(f"[{utils.now()}][CServer] I am recommending you talk to {self.fingers[i].nodeid} for more information...")
+                    if self.verbose: print(f"[{utils.now()}][CServer] I am recommending you talk to {self.fingers[i].nodeid} for more information...")
                     return self.fingers[i].nodeid, self.fingers[i].addr
             except AttributeError: # occurs when next finger has not yet been determined (is None)
                 # go ahead and stop the search here. TODO: thoughts on trying to find the next non-None finger?
@@ -361,11 +366,11 @@ class ChordClient:
                     return self.fingers[i].nodeid, self.fingers[i].addr
                 except AttributeError:
                     #print("[CPF] Successor down, sleeping and retrying...")
-                    print(f"[{utils.now()}][CPF] Successor down, failing...")
+                    if self.verbose: print(f"[{utils.now()}][CPF] Successor down, failing...")
                     raise utils.TryAgainError
                     #time.sleep(self.lookup_timeout)
                     #return self.closest_preceeding_finger(key)
-        print("reached end of cpf. didn't think we'd get here. raising try again to be safe")
+        if self.verbose: print("reached end of cpf. didn't think we'd get here. raising try again to be safe")
         raise utils.TryAgainError
 
     def leave(self):
@@ -402,17 +407,17 @@ class ChordClient:
             # If fgr i+1 has correct finger, then if this succ(fgr i) also succeeds fgr i+2,
             # it will have already been updated by this same process, when fgr i+1 last updated its successor.
 
-            i = 1
+            #i = 1
             n = self.system_bitwidth
             # Note that we use self.nodeid+1 as the (exclusive) end bound,
             # because the furthest clkwise any finger can point is ourself (otherwise, ourself is a closer successor).
-            check_idx = (fgr_idx + i) % n
+            check_idx = (fgr_idx + 1) % n
             check_fgr = self.fingers[check_idx]
-            while self.inrange(self.finger_start(check_idx), (self.nodeid+1), corr_fgr) and (check_fgr is None or check_fgr.nodeid != corr_fgr):
+            while self.inrange(self.finger_start(check_idx), self.mod(self.nodeid+1), corr_fgr) and (check_fgr is None or check_fgr.nodeid != corr_fgr):
                 #if self.verbose: print(f"\t [Poker] While at it, also set finger {fgr_idx+i} to {corr_fgr}, as this is the (closest) successor of a smaller finger's start, meaning it this finger must be stale...")
                 self.fingers[check_idx] = self.fingers[fgr_idx] # TODO: is this dangerous to share socket/Node objs between fingers?
-                i += 1
-                check_idx = (fgr_idx + i) % n
+                #i += 1
+                check_idx = (check_idx+1) % n
                 check_fgr = self.fingers[check_idx]
         elif self.verbose: print(f"[Poker] Finger {fgr_idx} was already correct")
 
@@ -426,6 +431,7 @@ class ChordClient:
     def pop_succ(self):
         # Next man up in succlist is taken as new succ
         self.succlist = self.succlist[1:] + [None]
+        print(f"My successor {self.fingers[0]} died, so I am changing my successor to {self.succlist[0]}")
         self.fingers[0] = self.succlist[0]
         #print(self.fingers)
         #print(self.succlist)
@@ -435,7 +441,7 @@ class ChordClient:
             # TODO: think harder about implications heree and if anything can go wrong,
             # since join is originally called without possibility of server/stabilize/finger interrupting
             #  - server bc we are not yet part of circle or registered with catalog, so no one can find us
-            if self.verbose: print(f"[{utils.now()}][Stabilizer] Lost all successors, rejoining system...")
+            if self.verbose: print(f"[{utils.now()}][Stabilizer][REJOIN|BAD] Lost all successors, rejoining system...")
             self.setup()
         return
 
@@ -446,7 +452,7 @@ class ChordClient:
         try:
             succ_pred = self.fingers[0].rpc.predecessor()
             if succ_pred is not None and self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid):
-                if self.verbose: print(f"[{utils.now()}][Stabilizer] Found that {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
+                print(f"[{utils.now()}][Stabilizer] Found that succ.pred {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
                 self.fingers[0] = Node(*succ_pred, **self.cxn_kwargs)
             # TODO: remove if no problems arise: should be fine here bc we delay stabilizing until port is known
             #while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
@@ -611,9 +617,8 @@ class ChordClient:
                     except BadRequestError as e:
                         res = e
                     rsp = self.build_response(res)
-                    if self.verbose: print(f'[{utils.now()}][Server] Prepping response {rsp} to {addr[0]}:{addr[1]}...')
                     utils.send_nl_message(rd_skt, utils.encode_object(rsp))
-                    if self.verbose: print(f'[{utils.now()}][Server] Sent response {rsp} to {addr[0]}:{addr[1]}...')
+                    if self.verbose: print(f'[{utils.now()}][Server] Sent response {rsp} to {addr[0]}:{addr[1]} regarding {request}...')
                 except (ConnectionError, StopIteration):
                     if self.verbose: print(f'[{utils.now()}][Server] Lost connection with {addr[0]}:{addr[1]}.')
                     rd_skt.close()
@@ -627,7 +632,7 @@ class ChordClient:
         try:
             return utils.execute_operation(request, self)
         except Exception as e:
-            print(f"Dispatcher got {type(e).__name__}")
+            if self.verbose: print(f"Dispatcher got {type(e).__name__}")
             raise BadRequestError(e)
 
     def build_response(self, result):

@@ -90,7 +90,7 @@ class RPCClient:
             response = utils.decode_object(next(self.server_msgs)) #utils.receive_nl_message(self.server_socket))
 
             if self.verbose:
-                print(f'[{utils.now()}][RPCClient:{self.name}] Received response: {response}')
+                print(f'[{utils.now()}][RPCClient:{self.name}] Received response\n{response}\nto request\n{request}')
 
             # Return result to caller or raise exception
             if response['status'] == 'success':
@@ -114,7 +114,7 @@ class RPCClient:
                 raise e
 
         except (ConnectionError, socket.timeout, StopIteration) as e: # StopIteration in case the next client message is not available bc connection closed
-            if self.verbose: print(f'[{utils.now()}][RPCClient:{self.name}] Connection lost on request {request} ({type(e).__name__}:{self.server_socket.gettimeout()})')
+            if self.verbose: print(f'[{utils.now()}][RPCClient:{self.name}][BAD] Connection to {self.name} lost on request {request} ({type(e).__name__}:{self.server_socket.gettimeout()})')
             self.connected = False
             raise ConnectionError
 
