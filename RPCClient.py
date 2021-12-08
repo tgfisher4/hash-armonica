@@ -34,7 +34,7 @@ class RPCClient:
         try:
             server_info = picker(self.catalog.query())
         except StopIteration:
-            if self.verbose: print(f"Couldn't find appropriate node in catalog")
+            if self.verbose: print(f"[{utils.now()}][RPCClient] Couldn't find appropriate node in catalog")
             raise ConnectionError
         self.name = server_info.get('project', server_info.get('type'))
         return server_info['address'], int(server_info['port'])
@@ -51,11 +51,11 @@ class RPCClient:
 
     def connect(self, host, port):
         ''' Connect to <host>:<port> for future RPC invocations. '''
-        if self.verbose: print(f"Connecting to {host}:{port}")
+        if self.verbose: print(f"[{utils.now()}][RPCClient] Connecting to {host}:{port}")
         self.server_socket.connect((host, port))
         self.connected = True
         self.addr = (host, port)
-        if self.verbose: print(f'[{self.name}] Successfully connected to {host}:{port}')
+        if self.verbose: print(f'[{utils.now()}][RPCClient:{self.name}] Successfully connected to {host}:{port}')
 
     def _rpc(self, method, args):
         ''' Invoke RPC <method> with arguments <args>.
@@ -66,14 +66,14 @@ class RPCClient:
             try:
                 self.connect(*addr)
             except Exception:
-                if self.verbose: print(f'Failed to connect to {self.name}')
+                if self.verbose: print(f'[{utils.now()}][RPCClient] Failed to connect to {self.name}')
                 raise ConnectionError
 
         # Ultra generalist approach: just pass a message invokation with an ordered list of its arguments
         # Server will handle/return attr/type errors
         try:
             if self.verbose:
-                print(f'[{self.name}] RPC invoked: {method}({", ".join(map(str, args))})')
+                print(f'[{utils.now()}][RPCClient:{self.name}] RPC invoked: {method}({", ".join(map(str, args))})')
             request = {
                 'method': method,
                 'arguments': args
@@ -85,12 +85,12 @@ class RPCClient:
             # These may fail, but not much sensible recovery to be done
             utils.send_nl_message(self.server_socket, encoded_message)
             if self.verbose:
-                print(f'[{self.name}] Sent request: {request}')
+                print(f'[{utils.now()}][RPCClient:{self.name}] Sent request: {request}')
             #response = utils.decode_object(utils.receive_nl_message(self.server_socket))
             response = utils.decode_object(next(self.server_msgs)) #utils.receive_nl_message(self.server_socket))
 
             if self.verbose:
-                print(f'[{self.name}] Received response: {response}')
+                print(f'[{utils.now()}][RPCClient:{self.name}] Received response: {response}')
 
             # Return result to caller or raise exception
             if response['status'] == 'success':
@@ -98,7 +98,7 @@ class RPCClient:
             elif response['status'] == 'HashTableNetworkUtils.RequestFormatError':
                 # This should never happen with correctly implemented stub
                 if self.verbose:
-                    print(f'[{self.name}] Client request rejected:\n'
+                    print(f'[{utils.now()}][RPCClient:{self.name}] Client request rejected:\n'
                           + '\n'.join(map(lambda line: ' '*4 + line, json.dumps(request, indent=4).split('\n')))
                           + '\n'
                           + response['description'])
@@ -113,8 +113,8 @@ class RPCClient:
                     raise RuntimeError(f'{error_name}: {response["description"]}')
                 raise e
 
-        except (ConnectionError, socket.timeout, StopIteration): # StopIteration in case the next client message is not available bc connection closed
-            if self.verbose: print(f'[{self.name}] Connection lost')
+        except (ConnectionError, socket.timeout, StopIteration) as e: # StopIteration in case the next client message is not available bc connection closed
+            if self.verbose: print(f'[{utils.now()}][RPCClient:{self.name}] Connection lost on request {request} ({type(e).__name__}:{self.server_socket.gettimeout()})')
             self.connected = False
             raise ConnectionError
 

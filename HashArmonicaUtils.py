@@ -2,8 +2,16 @@ import socket
 import json
 import sys
 import select
+import datetime
 
 class TryAgainError(Exception): pass
+
+def now(): return datetime.datetime.now().time()
+
+def rest(iterable):
+    to_return = iter(iterable)
+    next(to_return)
+    return to_return
 
 ''' HashArmonicaNetworkUtils provides common, opinionated networking utilities that both the client and server RPC stubs utilize.
     Here, we encapsulate our networking protocol, by which we mean how a message should be formatted over a TCP stream, and not the exact format of the message.
