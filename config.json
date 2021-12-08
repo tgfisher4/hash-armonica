@@ -1,0 +1,9 @@
+{
+    "cluster_name": "jbrown38-test-eval",
+    "bitwidth": 64,
+    "replication_factor": 5,
+    "failure_timeout": 15,
+    "wait_for_stable_timeout": 10,
+    "fixer_timeout": 5,
+    "stabilizer_timeout": 2
+}
