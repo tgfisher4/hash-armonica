@@ -106,11 +106,12 @@ class ChordClient:
         except AttributeError:
             return utils.TryAgainError
 
-    def __init__(self, cluster_name=None, force_nodeid=None, redirect_to=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, callback_fxn=lambda x,y: None):
+    def __init__(self, cluster_name=None, force_nodeid=None, redirect_to=None, bitwidth=128, succlistlen=4, stabilizer_timeout=1, fixer_timeout=3, lookup_timeout=3, failure_timeout=5, verbose=False, succs_callback=lambda x,y: None, pred_callback=lambda x: None):
         if cluster_name is None:
             raise ValueError("keyword argument cluster_name must be supplied")
         self.system_bitwidth = bitwidth
         self.myip = utils.myip()
+        self.destruct = False
 
         self.fingers = [None for _ in range(self.system_bitwidth)]
         self.pred = None
@@ -124,7 +125,8 @@ class ChordClient:
         self.failure_timeout = failure_timeout
         self.stabilizer_timeout = stabilizer_timeout
         self.fixer_timeout = fixer_timeout
-        self.callback_fxn = callback_fxn
+        self.succs_callback = succs_callback
+        self.pred_callback = pred_callback
         self.cxn_kwargs = {
             'timeout': self.failure_timeout,
             'verbose': self.verbose,
@@ -212,7 +214,10 @@ class ChordClient:
                     # Node with addr None will raise CxnErr when rpc attempted
                     self.pred = Node(self.mod(self.nodeid+1), (None, None), **self.cxn_kwargs)
                     print(f"[Setup] Setting succ to liaison: {self.fingers[0]} --> {liaison_info['address']}:{liaison_info['port']}")
-                    self.fingers[0] = Node(0, (liaison_info['address'], liaison_info['port']), **self.cxn_kwargs)
+                    # Choose nodeid of -1 so that it is obvious this is a dummy node.
+                    # We could probably ask liaison for nodeid, or parse from catalog project name or something, but unneeded.
+                    # Set to -1 to ensure that we don't accidentally interpret this as a real node.
+                    self.fingers[0] = Node(-1, (liaison_info['address'], liaison_info['port']), **self.cxn_kwargs)
                     # Ping here so we don't panic if we can't connect to liaison in lookup
                     self.fingers[0].rpc.ping()
                     self.fingers[0] = Node(*self.lookup(self.mod(self.nodeid+1)), **self.cxn_kwargs)
@@ -249,6 +254,7 @@ class ChordClient:
     # Recursive lookup:
     #   - benefit: sockets already open
     def lookup(self, hashed_key):
+        if self.destruct: raise utils.SelfDestructError
         if self.verbose: print(f"Looking up {hashed_key}...")
         #print(f"[{utils.now()}][CClient] Looking up {hashed_key}...")
         #hashed_key = self.hash(key.encode('utf-8')) % (2 ** self.system_bitwidth)
@@ -370,8 +376,8 @@ class ChordClient:
                     raise utils.TryAgainError
                     #time.sleep(self.lookup_timeout)
                     #return self.closest_preceeding_finger(key)
-        if self.verbose: print("reached end of cpf. didn't think we'd get here. raising try again to be safe")
-        raise utils.TryAgainError
+        if self.verbose: print("Reached end of cpf, meaning our last finger (and the rest, too) is equal to our successor. Returning last finger, then.")
+        return self.fingers[-1].nodeid, self.fingers[-1].addr
 
     def leave(self):
         # any implementation at the chord client level? maybe flip on "leaving" switch?
@@ -385,6 +391,10 @@ class ChordClient:
             time.sleep(self.fixer_timeout)
 
     def fix_finger(self):
+        # if system is shot, shut it down
+        if self.destruct:
+            if self.verbose: print(f"[{utils.now()}][Poker] Shutting down...")
+            return
         fgr_idx = random.choice([i for i, _ in enumerate(self.fingers)])
         if self.verbose: print(f"[{utils.now()}][Poker] Fixing finger {fgr_idx}")
         while True:
@@ -424,6 +434,10 @@ class ChordClient:
     def stabilizer(self):
         if self.verbose: print("[Stabilizer] Starting stabilizer...")
         while not self.leaving:
+            # if system is shot, shut it down
+            if self.destruct:
+                if self.verbose: print(f"[{utils.now()}][Stabilizer] Shutting down...")
+                return
             self.stabilize()
             # TODO: something more efficient than sleeping?
             time.sleep(self.stabilizer_timeout)
@@ -443,6 +457,8 @@ class ChordClient:
             #  - server bc we are not yet part of circle or registered with catalog, so no one can find us
             if self.verbose: print(f"[{utils.now()}][Stabilizer][REJOIN|BAD] Lost all successors, rejoining system...")
             self.setup()
+            print("Our succlist has been completely depleted. We cannot guarantee all data has been retained. Preparing to self-destruct.")
+            self.self_destruct = True
         return
 
     def stabilize(self):
@@ -516,7 +532,7 @@ class ChordClient:
         for i, new_succ in enumerate(new_succlist): # (static length succlist)
             # this loses references to obsolete rpcs, closing sockets via __del__
             self.succlist[i] = new_succ
-        self.callback_fxn(old_succlist, new_succlist)
+        self.succs_callback(old_succlist, new_succlist)
 
     def suspected_predecessor(self, src_id, src_addr):
         # TODO: make sure to handle case that pred is wrong, so lookup returns self when it shouldn't have
@@ -537,9 +553,11 @@ class ChordClient:
         """
 
         if self.pred is None or self.pred.nodeid == self.nodeid or self.inrange(src_id, self.pred.nodeid, self.nodeid):
+            old_pred = self.pred and self.pred.copy()
             if self.verbose: print(f"[{utils.now()}][Server] Contacted by better predecessor ({self.pred.nodeid if self.pred else 'None'} --> {src_id})...")
             #print(f"[Server] Contacted by better predecessor ({self.pred.nodeid if self.pred else 'None'} --> {src_id})...")
             self.pred = Node(src_id, src_addr, **self.cxn_kwargs)
+            self.pred_callback(old_pred)
         else:
             if self.verbose: print(f"[{utils.now()}][Server] Contacted by a worse predecessor (keeping {self.pred.nodeid} in favor of {src_id})...")
         #else: print(f"[Server] Contacted by a worse predecessor (keeping {self.pred.nodeid} in favor of {src_id})...")
@@ -596,6 +614,10 @@ class ChordClient:
         self.port = new_cxns.getsockname()[1]
         if self.verbose: print(f'[{utils.now()}][Server] Listening on port {self.port}...')
         while True: # Poll forever
+            # if system is shot, shut it down
+            if self.destruct:
+                if self.verbose: print(f"[{utils.now()}][Server] Shutting down...")
+                return
             readable, _, _ = select.select(socket_to_addr, [], []) # blocks until >= 1 skt ready
             for rd_skt in readable:
                 if socket_to_addr[rd_skt] is None:

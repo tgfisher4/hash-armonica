@@ -6,6 +6,8 @@ import datetime
 
 class TryAgainError(Exception): pass
 
+class SelfDestructError(Exception): pass
+
 def now(): return datetime.datetime.now().time()
 
 def rest(iterable):

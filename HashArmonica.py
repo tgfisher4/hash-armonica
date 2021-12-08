@@ -8,10 +8,11 @@ import collections
 import time
 
 class HashArmonica:
-    def __init__(self, cluster_name=None, force_nodeid=None, bitwidth=128, replication_factor=4, stabilizer_timeout=2, fixer_timeout=5, wait_for_stable_timeout=10, failure_timeout=15, verbose=False):
+    def __init__(self, cluster_name=None, force_nodeid=None, bitwidth=128, replication_factor=5, stabilizer_timeout=2, fixer_timeout=5, wait_for_stable_timeout=10, failure_timeout=15, verbose=False):
         self.bitwidth = bitwidth
         self.verbose = verbose
         self.replication_factor = replication_factor
+        # TODO: include self in replicas
         self.replicas = [None for _ in range(replication_factor-1)] 
         
         # Store the data that we own/have replicas
@@ -31,18 +32,24 @@ class HashArmonica:
        ## SETUP
         # Pass in callback function to ChordPeer to call when alert is needed
         # Counting self into the replication count (but not the replicas array), so only need replication_factor-1 extra replicas (where each member of succlist will be an extra replica)
+        # Chord system is failstop: fails when all members of succlist dies.
+        # So, a succlistlen of min(2, replication_factor) ensures that the system
+        # stays up if and only if it can guarantee it has lost no information.
+        # The minimum of 2 ensures we can always tolerate one node failure,
+        # so that the system can be used for non-replicated data in a meaningful way.
         self.chord = ChordClient(
             cluster_name=cluster_name,
             force_nodeid=force_nodeid,
             redirect_to=(utils.myip(), self.port),
             bitwidth=bitwidth,
-            succlistlen=replication_factor-1,
+            succlistlen=min(2, replication_factor),
             stabilizer_timeout=stabilizer_timeout,
             fixer_timeout=fixer_timeout,
             lookup_timeout=wait_for_stable_timeout,
             failure_timeout=failure_timeout,
             verbose=verbose,
-            callback_fxn=self.new_succlist_callback_fxn
+            succs_callback=self.new_succlist_callback_fxn,
+            pred_callback=self.new_pred_callback_fxn
         )
 
 
@@ -242,18 +249,29 @@ class HashArmonica:
         if start <= end:
             res = list(self.table.irange(start, end))
         else:
-            res = list(self.table.irange(end, None)) + list(self.table.irange(None, start))
+            res = list(self.table.irange(start, None)) + list(self.table.irange(None, end))
         if self.verbose: print(f"k-v pairs found in range [{start}, {end}]: {res}")
         return res
 
     def my_keys(self): 
         try:
             pred_id = self.chord.pred.nodeid
-        except AttributeError: raise TryAgainError
+            # Hacky and not satisfying soln that needs full knowledge of
+            # cleverness used in ChordPeer.setup :(
+            if self.chord.pred.addr[0] is None: raise utils.TryAgainError
+        except AttributeError: raise utils.TryAgainError
         return self.keys_in_range(self.chord.mod(pred_id+1), self.nodeid)
     
     ''' UPCALL FUNCTIONS '''
+    def new_pred_callback_fxn(self, old_pred):
+        if old_pred is not None:
+            print(f"Adjusted pred from {old_pred}, not None, so skipping insert")
+            return
+        print(f"Sending all my keys to my replicas")
+        for replica in self.replicas:
+            replica.rpc.mass_raw_insert([[k, self.table[k]] for k in self.my_keys()])
 
+    # TODO: remove new_succlist param since this can be accessed via self.chord?
     def new_succlist_callback_fxn(self, old_succlist, new_succlist):
         #old_succs = set(old_succlist)
         #new_succs = set(new_succlist)
@@ -267,7 +285,11 @@ class HashArmonica:
         new_replicas = [None for _ in range(self.replication_factor-1)]
         idx = 0
         for node in new_succlist:
-            if not node: continue
+            # Cap the number of replicas we allow
+            if idx == len(new_replicas): break
+            # succlist is frontloaded: this None --> rest None
+            if node is None: break
+            # Don't allow ourselves to be our own replica.
             if node.nodeid == self.nodeid: break
             try:
                 node_hasharmonica_addr = node.rpc.redirect()
@@ -311,7 +333,7 @@ class HashArmonica:
         new_replicas_set = set(new_replicas) - {None}
         old_replicas_set = set(old_replicas_dict.values()) - {None}
 
-        # Note: create new RPCClient.scket for each rpc here bc the ones in new/old_replicas_dict could be in use by the server
+        # Note: create new RPCClient/socket for each rpc here bc the ones in new_replicas/old_replicas_dict could be in use by the server
         for newbie in new_replicas_set - old_replicas_set:
             #if self.verbose: print(f"[Stabilizer] Copying keys to {newbie}...")
             if self.verbose: print(f"[Stabilizer] Copying {k_v_pairs} to {newbie}...")
@@ -322,6 +344,6 @@ class HashArmonica:
         for olbie in old_replicas_set - new_replicas_set:
             #if self.verbose: print(f"[Stabilizer] Dropping replicas from {olbie}...")
             if self.verbose: print(f"[Stabilizer] Dropping replica of {k_v_pairs} from {olbie}...")
-            try: olbie.copy().rpc.drop([self.chord.mod(self.pred.nodeid+1), self.nodeid])
+            try: olbie.copy().rpc.drop([self.chord.mod(self.chord.pred.nodeid+1), self.nodeid])
             except ConnectionError: pass # When nodes fail, they drop all anyway
-            except AttributeError: return # No pred: try again next time
+            #except AttributeError: return # No pred: try again next time
