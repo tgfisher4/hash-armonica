@@ -113,7 +113,7 @@ class RPCClient:
                     raise RuntimeError(f'{error_name}: {response["description"]}')
                 raise e
 
-        except (ConnectionError, socket.timeout, StopIteration) as e: # StopIteration in case the next client message is not available bc connection closed
+        except (ConnectionError, socket.timeout, StopIteration, TimeoutError) as e: # StopIteration in case the next client message is not available bc connection closed
             if self.verbose: print(f'[{utils.now()}][RPCClient:{self.name}][BAD] Connection to {self.name} lost on request {request} ({type(e).__name__}:{self.server_socket.gettimeout()})')
             self.connected = False
             raise ConnectionError
