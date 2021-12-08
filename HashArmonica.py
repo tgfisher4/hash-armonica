@@ -158,7 +158,7 @@ class HashArmonica:
             if self.verbose: print(f"Was told to remove {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
             raise utils.TryAgainError
         # Must make a special case for self bc we are in server thread, so we can't service any request we make here
-        self.raw_delete(hashed_key)
+        to_return = self.raw_delete(hashed_key)
         for replica in utils.rest(self.replicas):
             # Replicas list is frontloaded: one None means rest None
             if replica is None: break
