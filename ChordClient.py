@@ -587,7 +587,7 @@ class ChordClient:
         # then find out succ is dead, then set succ back to self (next in line), then re-stabilize and 
         # Possible alternative: just finish the current instance of stabilize with new succ and 
         #if self.pred and self.pred.nodeid == self.nodeid:
-        return (self.pred.nodeid, self.pred.addr)
+        return (self.pred.nodeid, self.pred.addr) if self.pred is not None and self.pred.addr[0] is not None else None
         
         return None
 

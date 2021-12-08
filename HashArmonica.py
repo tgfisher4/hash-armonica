@@ -269,7 +269,12 @@ class HashArmonica:
             return
         if self.verbose: print(f"Sending all my keys to my replicas")
         for replica in self.replicas:
-            replica.rpc.mass_raw_insert([[k, self.table[k]] for k in self.my_keys()])
+            if replica is None: break
+            try:
+                replica.rpc.mass_raw_insert([[k, self.table[k]] for k in self.my_keys()])
+            except ConnectionError:
+                # if replica has gone down, we'll learn in next stabilize
+                pass
 
     # TODO: remove new_succlist param since this can be accessed via self.chord?
     def new_succlist_callback_fxn(self, old_succlist, new_succlist):
