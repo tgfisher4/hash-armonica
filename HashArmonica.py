@@ -13,7 +13,6 @@ class HashArmonica:
         self.verbose = verbose
         self.replication_factor = replication_factor
         # TODO: include self in replicas
-        self.replicas = [None for _ in range(replication_factor-1)] 
         
         # Store the data that we own/have replicas
         self.table = SortedDict({})
@@ -42,7 +41,7 @@ class HashArmonica:
             force_nodeid=force_nodeid,
             redirect_to=(utils.myip(), self.port),
             bitwidth=bitwidth,
-            succlistlen=min(2, replication_factor),
+            succlistlen=max(2, replication_factor),
             stabilizer_timeout=stabilizer_timeout,
             fixer_timeout=fixer_timeout,
             lookup_timeout=wait_for_stable_timeout,
@@ -52,12 +51,9 @@ class HashArmonica:
             pred_callback=self.new_pred_callback_fxn
         )
 
-
-        
-        # TODO: ChordClient returns nodeid, successor
-        # succ is a tuple with ?
         self.nodeid = self.chord.nodeid
         if self.verbose: print(f"I am {self.nodeid}")
+        self.replicas = [None for _ in range(replication_factor)]
 
         
         # TODO: Query successor with our nodeid to obtain the data that we now own
@@ -72,7 +68,7 @@ class HashArmonica:
                     **self.chord.cxn_kwargs
                 ).rpc.push_keys(self.nodeid)
                 break
-            # AttrErr: succ is None (re/joining)
+            # AttrErr: succ is None (joining)
             # CxnErr: cannot reach succ: stabilize will resolve
             # TryAgainErr: succ.pred is None, so succcan't know range of
             #   keys to push to us. stabilizes will resolve
@@ -133,7 +129,6 @@ class HashArmonica:
         if not hashed_key in self.chord:
             if self.verbose: print(f"Was told to store {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
             raise utils.TryAgainError
-        self.raw_insert(hashed_key, value)
 
         # This iterator will reflect in-place updates to succlist that are performed by stabilize.
         # For this reason, as long as we are careful to update out succlist in-place and before
@@ -142,13 +137,17 @@ class HashArmonica:
         # its keys, meaning that there can be no weird card where we start this loop,
         # then the stabilize thread runs, discovers a replica not et reached by this loop that
         # to drop a key, then when resuming this loop, asks it to insert that key again.
-        for replica in self.replicas:
+
+        # Must make a special case for self bc we are in server thread, so we can't service any request we make here
+        self.raw_insert(hashed_key, value)
+        for replica in utils.rest(self.replicas):
             if replica is None: break
             try: replica.rpc.raw_insert(hashed_key, value)
             # replica down: we'll discover on next stabilize
-            except ConnectionError: pass
-        if self.verbose: print(f"Stored and replicated {hashed_key}->{value}. My new table:")
-        if self.verbose: print(self.table)
+            except ConnectionError:
+                if self.verbose: print(f"disconnected from {replica}")
+                pass
+        if self.verbose: print(f"Stored and replicated {hashed_key}->{value}. My new table:\n{self.table}")
 
     def raw_insert(self, key, value):
         self.table[key] = value
@@ -158,11 +157,12 @@ class HashArmonica:
         if not hashed_key in self.chord:
             if self.verbose: print(f"Was told to remove {hashed_key}, which falls outside my range of ({self.chord.pred.nodeid} --> {self.nodeid}]")
             raise utils.TryAgainError
-        to_return = self.raw_delete(hashed_key)
-        for replica in self.replicas:
+        # Must make a special case for self bc we are in server thread, so we can't service any request we make here
+        self.raw_delete(hashed_key)
+        for replica in utils.rest(self.replicas):
             # Replicas list is frontloaded: one None means rest None
             if replica is None: break
-            try: replica.rpc.raw_delete(key)
+            try: to_return = replica.rpc.raw_delete(hashed_key)
             # Replica down or key missing --> key already dropped
             except (ConnectionError, KeyError): pass    
                 
@@ -265,9 +265,9 @@ class HashArmonica:
     ''' UPCALL FUNCTIONS '''
     def new_pred_callback_fxn(self, old_pred):
         if old_pred is not None:
-            print(f"Adjusted pred from {old_pred}, not None, so skipping insert")
+            if self.verbose: print(f"Adjusted pred from {old_pred}, not None, so skipping insert")
             return
-        print(f"Sending all my keys to my replicas")
+        if self.verbose: print(f"Sending all my keys to my replicas")
         for replica in self.replicas:
             replica.rpc.mass_raw_insert([[k, self.table[k]] for k in self.my_keys()])
 
@@ -282,14 +282,18 @@ class HashArmonica:
             for node in [n for n in self.replicas if n]
         }
 
-        new_replicas = [None for _ in range(self.replication_factor-1)]
-        idx = 0
+        new_replicas = [None for _ in range(self.replication_factor)]
+        new_replicas[0] = (self.replicas[0]
+            if self.replicas[0] and self.replicas[0].nodeid == self.chord.nodeid
+            else Node(self.nodeid, (self.chord.myip, self.port), **self.chord.cxn_kwargs)
+        )
+
+        idx = 1
         for node in new_succlist:
-            # Cap the number of replicas we allow
             if idx == len(new_replicas): break
             # succlist is frontloaded: this None --> rest None
             if node is None: break
-            # Don't allow ourselves to be our own replica.
+            # Don't allow ourselves to be repeated in our replicas.
             if node.nodeid == self.nodeid: break
             try:
                 node_hasharmonica_addr = node.rpc.redirect()
@@ -308,16 +312,18 @@ class HashArmonica:
         # Other nodes' stabilizes will correct my pred: wait for these.
         # Better luck next stabilize!
         # Have not updated replicas, so will retry copying to new replicas next time.
-        except utils.TryAgainError: return
+        except utils.TryAgainError:
+            return
 
         # Update replicas in-place here, so that user requests to insert/delete a key
         # can view self.replicas without a lock and with the knowledge that a stale
         # read cannot mess up our system's correctness.
-        wrapped = False
+        #wrapped = False
         for i, new_replica in enumerate(new_replicas):
-            if new_replica and new_replica.nodeid == self.nodeid:
-                wrapped = True
-            self.replicas[i] = new_replica if not wrapped else None
+            #if new_replica and new_replica.nodeid == self.nodeid:
+            #    wrapped = True
+            self.replicas[i] = new_replica #if not wrapped else None
+        if self.verbose: print(f"updated self.replicas to {self.replicas}")
 
         # No pred case is handled above when we search my_keys()
         """

@@ -213,7 +213,7 @@ class ChordClient:
                     #self.pred = Node(self.nodeid+1, (self.myip, self.port), **self.cxn_kwargs)
                     # Node with addr None will raise CxnErr when rpc attempted
                     self.pred = Node(self.mod(self.nodeid+1), (None, None), **self.cxn_kwargs)
-                    print(f"[Setup] Setting succ to liaison: {self.fingers[0]} --> {liaison_info['address']}:{liaison_info['port']}")
+                    if self.verbose: print(f"[Setup] Setting succ to liaison: {self.fingers[0]} --> {liaison_info['address']}:{liaison_info['port']}")
                     # Choose nodeid of -1 so that it is obvious this is a dummy node.
                     # We could probably ask liaison for nodeid, or parse from catalog project name or something, but unneeded.
                     # Set to -1 to ensure that we don't accidentally interpret this as a real node.
@@ -221,7 +221,7 @@ class ChordClient:
                     # Ping here so we don't panic if we can't connect to liaison in lookup
                     self.fingers[0].rpc.ping()
                     self.fingers[0] = Node(*self.lookup(self.mod(self.nodeid+1)), **self.cxn_kwargs)
-                    print(f"[Setup] Looked up succ and now changing {liaison_info['address']}:{liaison_info['port']} --> {self.fingers[0].nodeid}")
+                    if self.verbose: print(f"[Setup] Looked up succ and now changing {liaison_info['address']}:{liaison_info['port']} --> {self.fingers[0].nodeid}")
                     # Note that 'rest' means that i starts at 1:
                     # we do not allow our own successor to be overriden.
                     for i, fgr in utils.rest(enumerate(self.fingers[0].rpc.finger_table())):
@@ -242,7 +242,7 @@ class ChordClient:
         except IndexError: # could not choose from empty peerlist: node is first member of chord cluster
             # The use of a Node/RPCClient to ourselves allows uniform handling of degenerate case
             #  - https://stackoverflow.com/a/8118180 suggests it is fine to have same process at both ends of a socket
-            print(f"[{utils.now()}][Setup] First node in cluster, setting self as succ and pred...")
+            if self.verbose: print(f"[{utils.now()}][Setup] First node in cluster, setting self as succ and pred...")
             self.fingers[0] = Node(self.nodeid, (self.myip, self.port), **self.cxn_kwargs)
             self.pred = self.fingers[0].copy()
         except ConnectionError: # found liaison in catalog but couldn't connect
@@ -445,7 +445,7 @@ class ChordClient:
     def pop_succ(self):
         # Next man up in succlist is taken as new succ
         self.succlist = self.succlist[1:] + [None]
-        print(f"My successor {self.fingers[0]} died, so I am changing my successor to {self.succlist[0]}")
+        if self.verbose: print(f"My successor {self.fingers[0]} died, so I am changing my successor to {self.succlist[0]}")
         self.fingers[0] = self.succlist[0]
         #print(self.fingers)
         #print(self.succlist)
@@ -457,7 +457,7 @@ class ChordClient:
             #  - server bc we are not yet part of circle or registered with catalog, so no one can find us
             if self.verbose: print(f"[{utils.now()}][Stabilizer][REJOIN|BAD] Lost all successors, rejoining system...")
             self.setup()
-            print("Our succlist has been completely depleted. We cannot guarantee all data has been retained. Preparing to self-destruct.")
+            if self.verbose: print("Our succlist has been completely depleted. We cannot guarantee all data has been retained. Preparing to self-destruct.")
             self.self_destruct = True
         return
 
@@ -468,7 +468,7 @@ class ChordClient:
         try:
             succ_pred = self.fingers[0].rpc.predecessor()
             if succ_pred is not None and self.inrange(succ_pred[0], self.nodeid, self.fingers[0].nodeid):
-                print(f"[{utils.now()}][Stabilizer] Found that succ.pred {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
+                if self.verbose: print(f"[{utils.now()}][Stabilizer] Found that succ.pred {succ_pred[0]} is a better successor than {self.fingers[0].nodeid}...")
                 self.fingers[0] = Node(*succ_pred, **self.cxn_kwargs)
             # TODO: remove if no problems arise: should be fine here bc we delay stabilizing until port is known
             #while self.port is None: time.sleep(self.lookup_timeout) # delay until server running
